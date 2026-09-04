@@ -1,0 +1,9 @@
+/target
+/frames
+/cleaned
+samples/
+*.insv
+*.tmp
+/tmp/
+.DS_Store
+**/.DS_Store

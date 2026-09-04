@@ -1,0 +1,116 @@
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+#[derive(Debug, Parser)]
+#[command(name = "insta-keyframes", version, about = "IMU-guided keyframe extractor for Insta360 video")]
+pub struct Cli {
+    /// First lens video file (.insv)
+    #[arg(long, value_name = "FILE")]
+    pub video_a: Option<PathBuf>,
+
+    /// Second lens video file (.insv)
+    #[arg(long, value_name = "FILE")]
+    pub video_b: Option<PathBuf>,
+
+    /// Input directory containing paired .insv files
+    #[arg(long, value_name = "DIR")]
+    pub input_directory: Option<PathBuf>,
+
+    /// Output directory
+    #[arg(long, short = 'o', value_name = "DIR")]
+    pub output: PathBuf,
+
+    /// Rotation threshold in degrees
+    #[arg(long, value_name = "DEG")]
+    pub rotation_threshold: Option<f64>,
+
+    /// Minimum interval (e.g. 300ms or 300)
+    #[arg(long, value_name = "DUR")]
+    pub min_interval: Option<String>,
+
+    /// Maximum interval (e.g. 2500ms or 2500)
+    #[arg(long, value_name = "DUR")]
+    pub max_interval: Option<String>,
+
+    /// Enable optical flow validation
+    #[arg(long)]
+    pub optical_flow: bool,
+
+    /// Disable blur rejection
+    #[arg(long)]
+    pub no_reject_blur: bool,
+
+    /// Reject blur (default)
+    #[arg(long)]
+    pub reject_blur: bool,
+
+    /// Preset name
+    #[arg(long, value_name = "PRESET")]
+    pub preset: Option<String>,
+
+    /// Output format: jpeg|png
+    #[arg(long, value_name = "FMT")]
+    pub format: Option<String>,
+
+    /// JPEG quality 1-100
+    #[arg(long, value_name = "N")]
+    pub jpeg_quality: Option<u8>,
+
+    /// Use flat file naming
+    #[arg(long)]
+    pub flat_naming: bool,
+
+    /// Verbose (-v, -vv)
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum Commands {
+    /// Analyze telemetry and select timestamps without extracting images
+    Analyze {
+        #[arg(long, value_name = "FILE")]
+        video_a: Option<PathBuf>,
+        #[arg(long, value_name = "FILE")]
+        video_b: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        input_directory: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        output: Option<PathBuf>,
+    },
+    /// Generate HTML preview
+    Preview {
+        #[arg(long, value_name = "FILE")]
+        video_a: Option<PathBuf>,
+        #[arg(long, value_name = "FILE")]
+        video_b: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        input_directory: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        output: Option<PathBuf>,
+    },
+}
+
+impl Cli {
+    pub fn effective_video_a(&self) -> Option<&PathBuf> {
+        self.video_a.as_ref()
+    }
+    pub fn effective_video_b(&self) -> Option<&PathBuf> {
+        self.video_b.as_ref()
+    }
+}
+
+pub fn parse_duration_ms(s: &str) -> anyhow::Result<i64> {
+    let s = s.trim().to_lowercase();
+    if let Some(stripped) = s.strip_suffix("ms") {
+        Ok(stripped.parse::<i64>()?)
+    } else if let Some(stripped) = s.strip_suffix('s') {
+        let v: f64 = stripped.parse()?;
+        Ok((v * 1000.0) as i64)
+    } else {
+        Ok(s.parse::<i64>()?)
+    }
+}

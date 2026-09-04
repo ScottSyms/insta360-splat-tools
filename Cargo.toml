@@ -1,0 +1,49 @@
+[package]
+name = "insta-keyframes"
+version = "0.1.0"
+edition = "2021"
+description = "IMU-guided keyframe extractor + high-throughput masking for Insta360 360° video — two Rust CLIs (insta-keyframes, insta-mask) for SfM / Gaussian Splatting"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/anomalyco/opencode"
+keywords = ["insta360", "photogrammetry", "gaussian-splatting", "sfm", "imu"]
+categories = ["multimedia", "science"]
+
+[[bin]]
+name = "insta-keyframes"
+path = "src/main.rs"
+
+[[bin]]
+name = "insta-mask"
+path = "src/bin/insta-mask.rs"
+
+[lib]
+name = "insta_keyframes"
+path = "src/lib.rs"
+
+[dependencies]
+telemetry-parser = { git = "https://github.com/AdrianEddy/telemetry-parser", branch = "master" }
+ffmpeg-next = { version = "9.0", optional = true }
+nalgebra = { version = "0.32", features = ["std"] }
+image = { version = "0.25", features = ["jpeg", "png"] }
+imageproc = "0.25"
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rayon = "1.10"
+walkdir = "2"
+tempfile = "3"
+
+[features]
+default = ["ffmpeg"]
+ffmpeg = ["dep:ffmpeg-next"]
+opencv = []
+macos-vision = []
+
+[dev-dependencies]
+approx = "0.5"
+tempfile = "3"
