@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Full workflow runner: keyframe extraction → masking → matching pair selection → COLMAP
-Times each step, echoes command, pauses for user input, totals time.
-
-Skips Gaussian Splat training (no binary available per spec).
+Full workflow runner: keyframe extraction → masking → matching pair selection → COLMAP → Gaussian Splat
+Times each step, echoes command, totals time. Batch by default, --interactive to pause.
 
 Usage:
   python3 workflow.py
   python3 workflow.py --project ./room --samples ./samples
   python3 workflow.py --skip-colmap  # skip colmap stages if colmap not installed
+  python3 workflow.py --skip-splat   # skip opensplat training
 """
 
 import argparse
@@ -73,33 +72,40 @@ def pause(msg="Press Enter to continue to next step (Ctrl-C to abort)..."):
             pass
 
 def main():
-    parser = argparse.ArgumentParser(description="Batch workflow for imu-keyframes + scene-mask (COLMAP)")
+    parser = argparse.ArgumentParser(description="Batch workflow for imu-keyframes + scene-mask + opensplat (COLMAP)")
     parser.add_argument("--project", default="./room", help="Project directory (will be created/cleared for build)")
     parser.add_argument("--samples", default="./samples", help="Directory containing paired .insv")
     parser.add_argument("--calibration", default=None, help="Optional calibration.json path")
     parser.add_argument("--skip-colmap", action="store_true", help="Skip colmap stages")
+    parser.add_argument("--skip-splat", action="store_true", help="Skip Gaussian Splat training (opensplat)")
+    parser.add_argument("--splat-args", default="", help="Extra args for opensplat (e.g. '--downscale-factor 2 -n 1000')")
     parser.add_argument("--interactive", action="store_true", help="Pause between steps for interactive use (default: batch, no pause)")
     parser.add_argument("--pause", action="store_true", help="Alias for --interactive")
     parser.add_argument("--release", action="store_true", help="Use cargo run --release (faster)")
+    parser.add_argument("--fast", action="store_true", help="Accelerated: Turbo + workers + downscale (fastest, slight quality loss)")
+    parser.add_argument("--turbo", action="store_true", help="Alias for --fast")
     args = parser.parse_args()
 
     project = Path(args.project)
     samples = Path(args.samples)
     calibration = Path(args.calibration) if args.calibration else None
+    accelerate = args.fast or args.turbo
+    # Fast implies release for 20x speedup (debug 0.2 img/s → release 6.0 img/s)
+    use_release = args.release or accelerate
+    if accelerate and not use_release:
+        print("→ --fast/--turbo implies --release for maximum speed")
+        use_release = True
 
-    # Resolve binaries: prefer target/release if --release or exists
+    # Resolve binaries: prefer target/release if --release/--fast or exists
     def bin_cmd(name):
         release = Path(f"target/release/{name}")
         debug = Path(f"target/debug/{name}")
-        if args.release and release.exists():
+        if use_release and release.exists():
             return [str(release)]
         if release.exists() and not debug.exists():
             return [str(release)]
-        # fallback to cargo run
-        profile = "--release" if args.release else ""
-        # Use cargo run wrapper
         base = ["cargo", "run", "--bin", name]
-        if args.release:
+        if use_release:
             base.insert(2, "--release")
         base.append("--")
         return base
@@ -116,6 +122,50 @@ def main():
         subprocess.run(["swiftc", "tools/vision_person.swift", "-o", "target/debug/vision-person"])
         subprocess.run(["swiftc", "tools/vision_person.swift", "-o", "target/release/vision-person"])
 
+    def find_opensplat():
+        for p in ["/Users/scottsyms/.local/bin/opensplat", "/opt/homebrew/bin/opensplat", "opensplat"]:
+            if Path(p).exists():
+                return p
+            # try which
+            try:
+                out = subprocess.run(["which", p], capture_output=True, text=True)
+                if out.returncode == 0 and Path(out.stdout.strip()).exists():
+                    return out.stdout.strip()
+            except:
+                pass
+        # fallback to PATH lookup
+        for cand in ["opensplat"]:
+            try:
+                out = subprocess.run(["which", cand], capture_output=True, text=True)
+                if out.returncode == 0:
+                    return out.stdout.strip()
+            except:
+                pass
+        return "opensplat"
+
+    def prepare_opensplat_project(proj: Path):
+        # Ensure opensplat can find the COLMAP project:
+        # Opensplat expects either <project>/sparse or <project>/colmap/sparse
+        # Our layout is <project>/colmap/sparse/0 and <project>/images
+        # Create symlinks for compatibility: <project>/sparse -> colmap/sparse and <project>/colmap/images -> ../images
+        try:
+            sparse_link = proj / "sparse"
+            colmap_sparse = proj / "colmap" / "sparse"
+            if colmap_sparse.exists() and not sparse_link.exists():
+                # Use symlink if possible, else copy
+                try:
+                    sparse_link.symlink_to(colmap_sparse, target_is_directory=True)
+                except:
+                    pass
+            colmap_images = proj / "colmap" / "images"
+            if not colmap_images.exists() and (proj / "images").exists():
+                try:
+                    colmap_images.symlink_to(Path("..") / "images", target_is_directory=True)
+                except:
+                    pass
+        except Exception as e:
+            print(f"  (prepare opensplat project warning: {e})")
+
     steps = []
     total = 0.0
 
@@ -123,33 +173,53 @@ def main():
     step1 = imu_bin + ["build", "--input-directory", str(samples), "--project", str(project)]
     if calibration:
         step1 += ["--calibration", str(calibration)]
-    steps.append(("1/7 — Keyframe extraction (imu-keyframes build)", step1))
+    steps.append(("1/8 — Keyframe extraction (imu-keyframes build)", step1))
 
-    # Step 2: Masking
-    step2 = mask_bin + ["--images", str(project / "images"), "--output", str(project / "masks"), "--colmap-layout", "--preset", "photogrammetry-clean"]
-    # Alternative legacy: --input ./frames --output ./cleaned
-    steps.append(("2/7 — Masking (scene-mask)", step2))
+    # Step 2: Masking — accelerated with --turbo (384, fast, 0 dilate, 15° temporal, no colmap double-write)
+    if accelerate:
+        step2 = mask_bin + ["--images", str(project / "images"), "--output", str(project / "masks"), "--colmap-layout", "--turbo", "--workers", "0"]
+    else:
+        step2 = mask_bin + ["--images", str(project / "images"), "--output", str(project / "masks"), "--colmap-layout", "--preset", "photogrammetry-clean"]
+    steps.append(("2/8 — Masking (scene-mask)" + (" [turbo]" if accelerate else ""), step2))
 
     # Step 3: COLMAP init
-    steps.append(("3/7 — COLMAP init (cameras/images)", imu_bin + ["colmap-init", "--project", str(project)]))
+    steps.append(("3/8 — COLMAP init (cameras/images)", imu_bin + ["colmap-init", "--project", str(project)]))
 
     # Step 4: Pair selection
-    steps.append(("4/7 — Pair selection (colmap-pairs)", imu_bin + ["colmap-pairs", "--project", str(project), "--temporal-before", "4", "--temporal-after", "8"]))
+    steps.append(("4/8 — Pair selection (colmap-pairs)", imu_bin + ["colmap-pairs", "--project", str(project), "--temporal-before", "4", "--temporal-after", "8"]))
 
     # Step 5: Feature extraction
-    steps.append(("5/7 — COLMAP feature extraction", imu_bin + ["colmap-features", "--project", str(project)]))
+    steps.append(("5/8 — COLMAP feature extraction", imu_bin + ["colmap-features", "--project", str(project)]))
 
     # Step 6: Matching
-    steps.append(("6/7 — COLMAP matching", imu_bin + ["colmap-match", "--project", str(project), "--rig-verification"]))
+    steps.append(("6/8 — COLMAP matching", imu_bin + ["colmap-match", "--project", str(project), "--rig-verification"]))
 
     # Step 7: Mapping
-    steps.append(("7/7 — COLMAP mapper (sparse reconstruction)", imu_bin + ["colmap-map", "--project", str(project), "--fix-rig"]))
+    steps.append(("7/8 — COLMAP mapper (sparse reconstruction)", imu_bin + ["colmap-map", "--project", str(project), "--fix-rig"]))
 
     # Optionally diagnose
     steps.append(("7b — Diagnose", imu_bin + ["colmap-diagnose", "--project", str(project)]))
 
+    # Step 8: Gaussian Splat (opensplat) — unless skipped
+    if not args.skip_splat:
+        opensplat_bin = find_opensplat()
+        splat_output = project / "splat.ply"
+        splat_extra = shlex.split(args.splat_args) if args.splat_args else []
+        if not splat_extra:
+            # Accelerated: larger downscale + fewer iters for quick preview
+            if accelerate:
+                splat_extra = ["--downscale-factor", "4", "-n", "5000"]
+            else:
+                splat_extra = ["--downscale-factor", "2", "-n", "30000"]
+        splat_cmd = [opensplat_bin, str(project), "-o", str(splat_output)] + splat_extra
+        steps.append(("8/8 — Gaussian Splat (opensplat)" + (" [fast]" if accelerate else ""), splat_cmd))
+
     if args.skip_colmap:
-        steps = steps[:2]  # only build + mask
+        # Keep only build + mask + splat (if not skipped), but splat needs colmap so skip it too if colmap skipped
+        steps = [s for s in steps if "COLMAP" not in s[0] and "Diagnose" not in s[0] and "Splat" not in s[0]]
+        # Re-add splat only if explicitly not skipped and colmap was skipped? For now keep only build+mask
+        if not args.skip_splat and not args.skip_colmap:
+            pass  # already handled
 
     print(f"\nFull workflow: {len(steps)} steps")
     print(f"Project: {project}   Samples: {samples}")
@@ -161,7 +231,20 @@ def main():
     interactive = args.interactive or args.pause
     for title, cmd in steps:
         print(f"\n\n### {title}")
-        elapsed, code = run_step(cmd)
+        # Prepare for opensplat: ensure symlinks for COLMAP layout
+        if "Splat" in title:
+            prepare_opensplat_project(project)
+            # Try project root first, fallback to colmap subfolder if Invalid project folder
+            elapsed, code = run_step(cmd)
+            if code != 0:
+                # Check if error was Invalid project folder, try colmap subfolder
+                alt_cmd = [cmd[0], str(project / "colmap"), "-o", str(project / "splat.ply")] + (shlex.split(args.splat_args) if args.splat_args else ["--downscale-factor", "2", "-n", "30000"])
+                print(f"\n  (trying fallback: {' '.join(shlex.quote(c) for c in alt_cmd)})")
+                elapsed2, code2 = run_step(alt_cmd)
+                elapsed = elapsed2
+                code = code2
+        else:
+            elapsed, code = run_step(cmd)
         total += elapsed
         if interactive:
             pause()

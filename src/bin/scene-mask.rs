@@ -409,9 +409,83 @@ fn main() -> Result<()> {
 
     let mut mask_frames = Vec::new();
 
+    // Use chunk-parallel when workers !=1 and we have enough frames (preserves temporal within chunk)
+    let use_parallel = cfg.workers != 1 && kf_manifest.frames.len() > 8;
+    if use_parallel {
+        let chunk_size = 8;
+        // If workers >0, we could configure threadpool, but rayon default is num_cpus
+        let chunk_results: Vec<(Vec<MaskFrame>, Vec<(usize, PathBuf, PathBuf, f64, f64)>, usize, usize)> = kf_manifest.frames
+            .par_chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let mut local_prev_a: Option<Vec<u8>> = None;
+                let mut local_prev_b: Option<Vec<u8>> = None;
+                let mut local_frames = Vec::new();
+                let mut local_results = Vec::new();
+                let mut local_prop = 0usize;
+                let mut local_full = 0usize;
+                for (local_idx, entry) in chunk.iter().enumerate() {
+                    let idx = chunk_idx * chunk_size + local_idx;
+                    let t_frame = std::time::Instant::now();
+                    let src_a = input_dir.join(&entry.lens_a);
+                    let src_b = input_dir.join(&entry.lens_b);
+                    if !src_a.exists() || !src_b.exists() {
+                        continue;
+                    }
+                    let (img_a_res, img_b_res) = rayon::join(|| DecodedImage::from_path(&src_a), || DecodedImage::from_path(&src_b));
+                    let img_a = match img_a_res { Ok(v) => v, Err(_) => continue };
+                    let img_b = match img_b_res { Ok(v) => v, Err(_) => continue };
+                    let can_propagate_a = local_prev_a.is_some() && validate_propagation(entry.motion.rotation_delta_deg, &prop_cfg);
+                    let can_propagate_b = local_prev_b.is_some() && validate_propagation(entry.motion.rotation_delta_deg, &prop_cfg);
+                    let (mask_a, frac_a) = match process_lens(&img_a, entry.motion.rotation_delta_deg, &cfg, segmenter.as_ref(), &shadow_cfg, can_propagate_a.then_some(local_prev_a.as_deref()).flatten(), &cli) { Ok(v) => v, Err(_) => continue };
+                    let (mask_b, frac_b) = match process_lens(&img_b, entry.motion.rotation_delta_deg, &cfg, segmenter.as_ref(), &shadow_cfg, can_propagate_b.then_some(local_prev_b.as_deref()).flatten(), &cli) { Ok(v) => v, Err(_) => continue };
+                    if can_propagate_a { local_prop += 1; } else { local_full += 1; }
+                    let out_a_mask = output_dir.join(format!("frames/{:06}/lens_a.mask.png", entry.id));
+                    let out_b_mask = output_dir.join(format!("frames/{:06}/lens_b.mask.png", entry.id));
+                    let _ = write_mask_png(&mask_a, img_a.width, img_a.height, &out_a_mask);
+                    let _ = write_mask_png(&mask_b, img_b.width, img_b.height, &out_b_mask);
+                    if cfg.colmap {
+                        let colmap_a = output_dir.join(format!("{}/{:06}_lens_a.png", cfg.colmap_masks_dir, entry.id));
+                        let colmap_b = output_dir.join(format!("{}/{:06}_lens_b.png", cfg.colmap_masks_dir, entry.id));
+                        let colmap_mask_a = if cfg.colmap_invert { insta_keyframes::mask::invert(&mask_a) } else { mask_a.clone() };
+                        let colmap_mask_b = if cfg.colmap_invert { insta_keyframes::mask::invert(&mask_b) } else { mask_b.clone() };
+                        let _ = write_mask_png(&colmap_mask_a, img_a.width, img_a.height, &colmap_a);
+                        let _ = write_mask_png(&colmap_mask_b, img_b.width, img_b.height, &colmap_b);
+                    }
+                    let out_a_jpg = output_dir.join(format!("frames/{:06}/lens_a.jpg", entry.id));
+                    let out_b_jpg = output_dir.join(format!("frames/{:06}/lens_b.jpg", entry.id));
+                    if !out_a_jpg.exists() { if let Some(p) = out_a_jpg.parent() { let _ = std::fs::create_dir_all(p); } let _ = std::fs::copy(&src_a, &out_a_jpg); }
+                    if !out_b_jpg.exists() { if let Some(p) = out_b_jpg.parent() { let _ = std::fs::create_dir_all(p); } let _ = std::fs::copy(&src_b, &out_b_jpg); }
+                    if cli.write_clean_images {
+                        let clean_a = output_dir.join(format!("frames/{:06}/lens_a.clean.jpg", entry.id));
+                        let clean_b = output_dir.join(format!("frames/{:06}/lens_b.clean.jpg", entry.id));
+                        let _ = insta_keyframes::image::encode::write_clean_image(&img_a, Some(&mask_a), &clean_a, &cli.clean_mode);
+                        let _ = insta_keyframes::image::encode::write_clean_image(&img_b, Some(&mask_b), &clean_b, &cli.clean_mode);
+                    }
+                    local_prev_a = Some(mask_a.clone());
+                    local_prev_b = Some(mask_b.clone());
+                    let rel_a = out_a_mask.strip_prefix(&output_dir).unwrap_or(&out_a_mask).to_string_lossy().to_string();
+                    let rel_b = out_b_mask.strip_prefix(&output_dir).unwrap_or(&out_b_mask).to_string_lossy().to_string();
+                    let src_rel_a = path_relative(&input_dir, &src_a);
+                    let src_rel_b = path_relative(&input_dir, &src_b);
+                    local_frames.push(MaskFrame { id: entry.id, lens_a: LensMask { source: src_rel_a, mask: rel_a, removed_fraction: frac_a }, lens_b: LensMask { source: src_rel_b, mask: rel_b, removed_fraction: frac_b } });
+                    local_results.push((entry.id, out_a_mask, out_b_mask, frac_a, frac_b));
+                    let dt = t_frame.elapsed();
+                    info!("[{}/{}] {:06} lens_a {:.1}% lens_b {:.1}%  {:>4}ms{}", idx+1, kf_manifest.frames.len(), entry.id, frac_a*100.0, frac_b*100.0, dt.as_millis(), if can_propagate_a || can_propagate_b { " [propagated]" } else { "" });
+                }
+                (local_frames, local_results, local_prop, local_full)
+            })
+            .collect();
+        // Merge chunks in order
+        for (frames, res, prop, full) in chunk_results {
+            mask_frames.extend(frames);
+            results.extend(res);
+            propagated_count += prop;
+            full_seg_count += full;
+        }
+    } else {
     for (idx, entry) in kf_manifest.frames.iter().enumerate() {
         let t_frame = std::time::Instant::now();
-        // Resolve source paths relative to input dir
         let src_a = input_dir.join(&entry.lens_a);
         let src_b = input_dir.join(&entry.lens_b);
 

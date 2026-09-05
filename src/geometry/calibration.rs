@@ -55,6 +55,10 @@ impl Calibration {
     }
 
     /// Default Insta360 X3 dual fisheye: cam0 forward, cam1 backward (180° yaw)
+    /// Uses OPENCV (8 params, widely supported by COLMAP + opensplat) as default
+    /// for maximum compatibility. For true fisheye distortion, use OPENCV_FISHEYE via
+    /// custom calibration.json (8 params) — note opensplat 1.2 currently reports
+    /// "Unsupported camera model: 5" for OPENCV_FISHEYE, so OPENCV is the safe default.
     pub fn default_x3(width: u32, height: u32) -> Self {
         Self {
             version: 1,
@@ -65,7 +69,7 @@ impl Calibration {
                 CameraCalibration {
                     sensor_id: 0,
                     name: "cam0".to_string(),
-                    model: "OPENCV_FISHEYE".to_string(),
+                    model: "OPENCV".to_string(),
                     width, height,
                     params: vec![width as f64*0.5, height as f64*0.5, width as f64/2.0, height as f64/2.0, 0.0,0.0,0.0,0.0],
                     camera_from_rig: Transform { rotation_wxyz: [1.0,0.0,0.0,0.0], translation_m: [0.0,0.0,0.0] },
@@ -73,7 +77,7 @@ impl Calibration {
                 CameraCalibration {
                     sensor_id: 1,
                     name: "cam1".to_string(),
-                    model: "OPENCV_FISHEYE".to_string(),
+                    model: "OPENCV".to_string(),
                     width, height,
                     params: vec![width as f64*0.5, height as f64*0.5, width as f64/2.0, height as f64/2.0, 0.0,0.0,0.0,0.0],
                     camera_from_rig: Transform { rotation_wxyz: [0.0,0.0,1.0,0.0], translation_m: [0.0,0.0,0.0] }, // 180° yaw
