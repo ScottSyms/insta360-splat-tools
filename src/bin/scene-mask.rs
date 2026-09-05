@@ -594,6 +594,7 @@ fn main() -> Result<()> {
         );
         debug!("frame {:06} a_frac {:.3} b_frac {:.3} propagated_a={}", entry.id, frac_a, frac_b, can_propagate_a);
     }
+    }
 
     let elapsed = start.elapsed();
     let total_images = mask_frames.len() * 2;

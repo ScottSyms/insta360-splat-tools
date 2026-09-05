@@ -373,14 +373,32 @@ fn handle_colmap_init(project: PathBuf, database: Option<PathBuf>, calibration: 
     tracing::info!("colmap-init: project={} db={} calib={}", project.display(), db_path.display(), calib_path.display());
     let cal = insta_keyframes::geometry::calibration::Calibration::load(&calib_path)?;
     let db = insta_keyframes::colmap::database::ColmapDatabase::create_or_open(&db_path)?;
+    // COLMAP 4.1 feature_extractor crashes with "Sensor (CAMERA, 1) is inserted twice into the rig"
+    // if any rigs/frames/frame_data exist (even valid). Feature extraction must run with only
+    // cameras+images; rigs are added at mapper time. Clean stale state from older builds.
+    for tbl in ["frame_data", "frames", "rig_sensors", "rigs"] {
+        let _ = db.conn.execute(&format!("DELETE FROM {}", tbl), []);
+    }
+    // Make re-runs idempotent: clear stale images/descriptors before re-inserting
+    let _ = db.conn.execute("DELETE FROM images", []);
+    // Also clear any leftover feature data from previous extraction
+    for tbl in ["keypoints", "descriptors", "matches", "two_view_geometries"] {
+        let _ = db.conn.execute(&format!("DELETE FROM {}", tbl), []);
+    }
     // For feature extraction, only cameras and images are needed; rigs/frames are deferred to mapper
     // to avoid rig.cc duplicate sensor error during feature extraction.
-    // Check if cameras already exist
+    // Reconcile cameras: if calibration changed, replace; otherwise reuse
     let existing_cams: i64 = db.conn.query_row("SELECT COUNT(*) FROM cameras", [], |r| r.get(0)).unwrap_or(0);
     let cam_ids = if existing_cams == 0 {
         insta_keyframes::colmap::cameras::ensure_cameras(&db.conn, &cal.cameras)?
     } else {
-        db.conn.prepare("SELECT camera_id FROM cameras")?.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?
+        // If camera count mismatches calibration, reset cameras
+        if existing_cams as usize != cal.cameras.len() {
+            let _ = db.conn.execute("DELETE FROM cameras", []);
+            insta_keyframes::colmap::cameras::ensure_cameras(&db.conn, &cal.cameras)?
+        } else {
+            db.conn.prepare("SELECT camera_id FROM cameras ORDER BY camera_id")?.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?
+        }
     };
     // Defer rig/frame creation to colmap-map stage (when needed for rig-aware BA)
     // Insert images
@@ -471,6 +489,15 @@ fn handle_colmap_features(project: PathBuf) -> anyhow::Result<()> {
     let masks = project.join("masks");
     let mask_opt = if masks.exists() { Some(masks.as_path()) } else { None };
     tracing::info!("colmap-features: db={} images={} masks={:?}", db.display(), images.display(), mask_opt);
+    // Defensive: if DB still contains stale rigs from a previous run (e.g. user restored DB),
+    // strip them here before invoking COLMAP so feature_extractor doesn't hit rig.cc:44.
+    if db.exists() {
+        if let Ok(conn) = rusqlite::Connection::open(&db) {
+            for tbl in ["frame_data", "frames", "rig_sensors", "rigs"] {
+                let _ = conn.execute(&format!("DELETE FROM {}", tbl), []);
+            }
+        }
+    }
     insta_keyframes::colmap::runner::run_feature_extractor(&db, &images, mask_opt)?;
     Ok(())
 }
@@ -488,6 +515,62 @@ fn handle_colmap_map(project: PathBuf, fix_rig: bool) -> anyhow::Result<()> {
     let images = project.join("images");
     let out = project.join("colmap/sparse");
     tracing::info!("colmap-map: db={} images={} fix_rig={}", db.display(), images.display(), fix_rig);
+    // Rig-aware BA needs a rig; create it now if missing (deferred from colmap-init to avoid
+    // feature_extractor crash). Also populate frames/frame_data for COLMAP 4.1 rig support.
+    if db.exists() {
+        if let Ok(conn) = rusqlite::Connection::open(&db) {
+            let rig_count: i64 = conn.query_row("SELECT COUNT(*) FROM rigs", [], |r| r.get(0)).unwrap_or(0);
+            if rig_count == 0 {
+                if let Ok(cam_ids) = conn.prepare("SELECT camera_id FROM cameras ORDER BY camera_id")
+                    .and_then(|mut s| s.query_map([], |r| r.get(0)).unwrap().collect::<Result<Vec<i64>, _>>())
+                {
+                    if cam_ids.len() >= 2 {
+                        if let Ok(rig_id) = insta_keyframes::colmap::rigs::ensure_rig_with_sensors(&conn, &cam_ids) {
+                            // Create one frame per physical shutter (paired cam0/cam1)
+                            let frame_count: i64 = conn.query_row("SELECT COUNT(*) FROM frames", [], |r| r.get(0)).unwrap_or(0);
+                            if frame_count == 0 {
+                                let images_cam0 = project.join("images/cam0");
+                                let n_frames = std::fs::read_dir(&images_cam0).map(|r| r.count()).unwrap_or(0);
+                                for _ in 0..n_frames {
+                                    let _ = insta_keyframes::colmap::frames::insert_frame(&conn, rig_id);
+                                }
+                                // Populate frame_data: each frame links to its two sensor images
+                                // COLMAP 4.1 expects (frame_id, data_id=image_id, sensor_id=camera_id, sensor_type=0)
+                                if let Ok(mut stmt) = conn.prepare("SELECT image_id, name, camera_id FROM images ORDER BY name") {
+                                    if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,String>(1)?, r.get::<_,i64>(2)?))) {
+                                        let mut by_frame: std::collections::HashMap<String, Vec<(i64,i64)>> = std::collections::HashMap::new();
+                                        for row in rows.flatten() {
+                                            let (img_id, name, cam_id) = row;
+                                            // name is "cam0/00000001.jpg" -> frame key "00000001"
+                                            let key = name.split('/').last().unwrap_or(&name).to_string();
+                                            by_frame.entry(key).or_default().push((img_id, cam_id));
+                                        }
+                                        let mut frame_ids: Vec<i64> = conn.prepare("SELECT frame_id FROM frames ORDER BY frame_id")
+                                            .and_then(|mut s| Ok(s.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>,_>>()?)).unwrap_or_default();
+                                        let mut sorted_keys: Vec<_> = by_frame.keys().cloned().collect();
+                                        sorted_keys.sort();
+                                        for (idx, key) in sorted_keys.iter().enumerate() {
+                                            if idx >= frame_ids.len() { break; }
+                                            let fid = frame_ids[idx];
+                                            if let Some(pairs) = by_frame.get(key) {
+                                                for (img_id, cam_id) in pairs {
+                                                    let _ = conn.execute(
+                                                        "INSERT OR IGNORE INTO frame_data (frame_id, data_id, sensor_id, sensor_type) VALUES (?1, ?2, ?3, 0)",
+                                                        rusqlite::params![fid, img_id, cam_id],
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            tracing::info!("created rig {} with {} frames for mapper (fix_rig={})", rig_id, conn.query_row("SELECT COUNT(*) FROM frames", [], |r| r.get::<_,i64>(0)).unwrap_or(0), fix_rig);
+                        }
+                    }
+                }
+            }
+        }
+    }
     insta_keyframes::colmap::runner::run_mapper(&db, &images, &out, fix_rig)?;
     Ok(())
 }
