@@ -5,11 +5,13 @@ Two Rust CLIs for Insta360 360° capture → reconstruction:
 1. **`imu-keyframes`** — IMU-guided keyframe extraction. Timestamps are the primary output: find **when** the camera moved via gyro, validate, and extract synchronized `lens_a`/`lens_b` frames only at those instants. Sits before COLMAP, Nerfstudio, Spirula Studio, Gaussian Splatting.
 2. **`scene-mask`** — High-throughput masking for the selected keyframes. Removes people / operator / shadows / known objects via a tiered pipeline (deterministic → Apple Vision → lightweight detector+ROI → promptable fallback) with temporal propagation. Outputs **masks** (preferred for SfM), not destructive edits.
 
-> Specs: [`specification.md`](specification.md) (keyframes) and [`specification2.md`](specification2.md) (masking) — full designs including pipeline, modules, and MVP milestones.
+> Specs: [`specification.md`](specification.md) (keyframes), [`specification2.md`](specification2.md) (masking), and [`specification3.md`](specification3.md) (IMU/geometry-assisted COLMAP) — full designs including pipeline, modules, and MVP milestones.
 
 ---
 
 ## Binaries & Workflow
+
+**Legacy (v0.1):**
 
 ```
 Insta360 .insv pair
@@ -26,6 +28,21 @@ scene-mask --input ./frames --output ./cleaned --remove people --remove shadows
       |
       v
 Spirula / COLMAP (respects masks) → Gaussian Splat
+```
+
+**Spec3 Project Layout (COLMAP-native, §5):**
+
+```
+imu-keyframes build --input-directory ./samples --project ./room
+  → ./room/images/cam0/00000001.jpg + cam1/00000001.jpg (same basename = rig frame)
+  → ./room/metadata/{calibration.json, keyframes.json, candidate_pairs.txt, run.json}
+  → ./room/colmap/database.db (rigs/cameras/frames/images via Level-2)
+
+scene-mask --images ./room/images --output ./room/masks --colmap-layout --remove person
+  → ./room/masks/cam0/00000001.jpg.png  (0=masked, COLMAP ImageReader.mask_path)
+
+imu-keyframes colmap-init/colmap-pairs/colmap-features/colmap-match/colmap-map --project ./room
+  → ./room/colmap/sparse/0/{cameras,images,points3D}.bin → Gaussian Splat trainer
 ```
 
 ---
@@ -243,6 +260,27 @@ Processed: 5 frames (10 images) in 44.8s  Throughput: 0.2 images/s
 COLMAP masks: masks/ (inverted=true) — use: colmap feature_extractor --image_path ./cleaned/frames --ImageReader.masks ./cleaned/masks
 ```
 
+### `imu-keyframes` — Spec3 COLMAP Pipeline (new)
+
+```
+imu-keyframes build --input-directory ./samples --project ./room
+  # → images/cam0/*.jpg + cam1/*.jpg, metadata/calibration.json
+
+imu-keyframes colmap-init --project ./room              # creates colmap/database.db rigs/cameras/frames
+imu-keyframes colmap-pairs --project ./room --temporal-before 4 --temporal-after 8 --loop-closure
+  # → metadata/candidate_pairs.txt (temporal + geometry + cross-lens + safety)
+
+scene-mask --images ./room/images --output ./room/masks --colmap-layout --remove person
+  # → masks/cam0/*.png (0=masked, COLMAP ImageReader.mask_path)
+
+imu-keyframes colmap-features --project ./room           # colmap feature_extractor with masks
+imu-keyframes colmap-match --project ./room --rig-verification
+imu-keyframes colmap-map --project ./room --fix-rig     # → colmap/sparse/0
+imu-keyframes colmap-diagnose --project ./room          # candidate/verified diagnostics
+```
+
+Legacy `imu-keyframes --input-directory --output` still works; `--project` triggers new deterministic `cam0/cam1` layout (§5).
+
 ---
 
 ## Outputs
@@ -437,9 +475,13 @@ Presets: `insta360-operator` (people+shadows+nadir+temporal), `people-only`, `pe
 
 ```bash
 cargo check --bins
-cargo test                         # imu-keyframes: 8 tests (filters, orientation, candidate)
+cargo test                         # 11 lib (geometry/transforms/overlap/pairs) + 8 bin (filters/orientation/candidate)
 cargo run --bin imu-keyframes -- --input-directory ./samples --output /tmp/dry analyze
+cargo run --bin imu-keyframes -- build --input-directory ./samples --project /tmp/room  # Spec3
+cargo run --bin imu-keyframes -- colmap-init --project /tmp/room
+cargo run --bin imu-keyframes -- colmap-pairs --project /tmp/room --temporal-before 4 --temporal-after 8
 cargo run --bin scene-mask -- --input /tmp/small_selected --output /tmp/cleaned --preset people-and-shadows --dilate 0
+cargo run --bin scene-mask -- --images /tmp/room/images --output /tmp/room/masks --colmap-layout --remove person
 RUST_LOG=debug cargo run --bin scene-mask -- --input ./frames --output ./cleaned --remove people -vv
 ```
 
@@ -466,6 +508,7 @@ Metrics logged (§24/§37): `images/sec`, `megapixels/sec`, `full segmentation` 
 
 - `specification.md` — keyframe extraction §§9–48
 - `specification2.md` — masking §§1–28 (tiered pipeline, presets, parallelism, memory)
+- `specification3.md` — IMU/geometry-assisted COLMAP (§§1-29, rig/frame, candidate graph, Level-2 DB, Gaussian Splat handoff)
 
 ## License
 
