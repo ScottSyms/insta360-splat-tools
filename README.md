@@ -74,23 +74,66 @@ imu-keyframes colmap-init/colmap-pairs/colmap-features/colmap-match/colmap-map -
 
 ## Platform
 
-- **Primary:** macOS Apple Silicon (M1–M4), `ffmpeg 9` via Homebrew, `imageproc` morphology
-- **Secondary:** Linux / Windows (feature-gated `ffmpeg`, `opencv`, `macos-vision`)
+- **Primary:** macOS 14+ Apple Silicon (M1–M4), tested on macOS 26.6.2 / M2 Max
+- **Secondary:** Linux / Windows (feature-gated `ffmpeg`, `opencv`, `macos-vision`; COLMAP with CUDA on Linux)
 
 ---
 
-## Installation
+## Dependencies
+
+| Dependency | Version (tested) | Required | Purpose | macOS Install | Notes |
+|---|---|---|---|---|---|
+| **Rust** | `1.96.0` | Yes | Build both CLIs | `rustup` / `brew install rustup` | `cargo 1.96` / `edition 2021` |
+| **ffmpeg** | `9.0.1` VideoToolbox | Yes | Exact `-ss` frame extraction (`ffmpeg-next 9.0`) | `brew install ffmpeg` | Must include `VideoToolbox`; `ffmpeg -version` should show `Apple clang` |
+| **COLMAP** | `4.1.1` | For SfM | Sparse reconstruction | `brew install colmap` | macOS build is CPU-only (`without CUDA`). Verify `colmap --version` |
+| **Xcode CLT / Swift** | `6.3.3` (swift-driver 1.148) | macOS only | Apple Vision person segmentation | `xcode-select --install` | Provides `swiftc`; `build.rs` compiles `tools/vision_person.swift` → `vision-person` helper |
+| **Python** | `3.10+` (tested `3.14.7`) | For `workflow.py` | End-to-end runner | `brew install python` | No pip deps; stdlib only (`argparse`, `pathlib`) |
+| **SQLite** | bundled via `rusqlite 0.32` | Yes | `colmap/database.db` | — | `bundled` feature compiles SQLite; no system install needed |
+| **OpenSplat** | `1.2.0` | For splatting | Gaussian Splat training | `pip install opensplat` or `cargo install` / `~/.local/bin/opensplat` | `workflow.py` auto-discovers via `which`; `--skip-splat` to omit |
+
+Optional / secondary:
+
+| Dependency | Purpose |
+|---|---|
+| `opencv` feature | Future `macos-vision` / Linux detector backends (`--features opencv`) |
+| `telemetry-parser` (git `master`) | Insta360 IMU extraction (`8db42d694ccc418790edff439fe026bf` magic) — fetched automatically |
+
+Verify all tools:
 
 ```bash
-rustc --version  # 1.96+
-ffmpeg -version  # 9.x with VideoToolbox
-brew install ffmpeg  # macOS
+rustc --version          # 1.96+
+cargo --version
+ffmpeg -version          # 9.x
+colmap --version         # 4.1.1
+swiftc --version         # 6.3.3
+python3 --version        # 3.10+
+opensplat --help         # 1.2.0 (optional)
+```
 
+---
+
+## Build
+
+```bash
+# 1. Clone
+git clone https://github.com/ScottSyms/insta360-splat-tools.git
+cd insta360-splat-tools  # repo is insta360frames locally
+
+# 2. Build both CLIs (release = 20× faster masking: 0.2 → 6.0 img/s)
 cargo build --release
+# outputs: target/release/imu-keyframes (10 MB), target/release/scene-mask
+# Swift helper is auto-built by build.rs (tools/vision_person.swift → target/release/vision-person)
+# Manual fallback if needed:
+swiftc tools/vision_person.swift -o target/release/vision-person
+swiftc tools/vision_person.swift -o target/debug/vision-person
+
+# 3. Smoke test
 ./target/release/imu-keyframes --help
 ./target/release/scene-mask --help
+target/release/vision-person --help 2>&1 | head   # optional Vision shim
+cargo test                                        # 20 tests: 13 lib + 7 bin
 
-# dev
+# dev (unoptimized, decode-bound ~0.2 img/s at 2880²)
 cargo run --bin imu-keyframes -- --help
 cargo run --bin scene-mask -- --help
 ```
@@ -100,8 +143,23 @@ Feature gates:
 ```bash
 cargo build --features ffmpeg        # default (ffmpeg + imageproc)
 cargo build --features macos-vision  # Apple Vision (macOS, Swift shim stub)
-cargo build --no-default-features    # telemetry-only
+cargo build --no-default-features    # telemetry-only, no ffmpeg
+cargo build --release --bins         # both binaries
 ```
+
+Rebuilding after updates:
+
+```bash
+cargo build --release --bins
+# or per-binary
+cargo build --release --bin imu-keyframes
+cargo build --release --bin scene-mask
+```
+
+Troubleshooting:
+
+* `scene-mask` unclosed delimiter / `rig.cc:44 HasSensor duplicate CAMERA 1` — fixed in `2affecd`; `colmap-init` now strips stale `rigs`/`frames`/`frame_data` before `feature_extractor` and recreates rig at `colmap-map`. If you restored an old `room/colmap/database.db`, delete it: `rm room/colmap/database.db && target/release/imu-keyframes colmap-init --project room`.
+* `vision-person` missing — `workflow.py` rebuilds it, or `build.rs` on next `cargo build`. Ensure `swiftc` in `PATH`.
 
 ---
 
