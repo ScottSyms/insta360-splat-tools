@@ -77,7 +77,7 @@ fn vision_quality_str(q: VisionQuality) -> &'static str {
 }
 
 fn find_vision_helper() -> Option<std::path::PathBuf> {
-    // Check next to current executable (for cargo run, binary is target/debug/insta-mask alongside vision-person)
+    // Check next to current executable (for cargo run, binary is target/debug/scene-mask alongside vision-person)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let p = dir.join("vision-person");

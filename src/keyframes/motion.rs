@@ -1,0 +1,1 @@
+pub fn motion_score(_delta_deg: f64) -> f32 { 1.0 }

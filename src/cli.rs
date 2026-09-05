@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "insta-keyframes", version, about = "IMU-guided keyframe extractor for Insta360 video")]
+#[command(name = "imu-keyframes", version, about = "IMU-guided keyframe extractor for Insta360 video")]
 pub struct Cli {
     /// First lens video file (.insv)
     #[arg(long, value_name = "FILE")]
@@ -16,9 +16,9 @@ pub struct Cli {
     #[arg(long, value_name = "DIR")]
     pub input_directory: Option<PathBuf>,
 
-    /// Output directory
+    /// Output directory (legacy, for project use --project)
     #[arg(long, short = 'o', value_name = "DIR")]
-    pub output: PathBuf,
+    pub output: Option<PathBuf>,
 
     /// Rotation threshold in degrees
     #[arg(long, value_name = "DEG")]
@@ -91,6 +91,85 @@ pub enum Commands {
         input_directory: Option<PathBuf>,
         #[arg(long, value_name = "DIR")]
         output: Option<PathBuf>,
+    },
+    /// Full build: extract + select + geometry + colmap init (Spec3 §6)
+    Build {
+        #[arg(long, value_name = "FILE")]
+        front: Option<PathBuf>,
+        #[arg(long, value_name = "FILE")]
+        rear: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        input_directory: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        project: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        calibration: Option<PathBuf>,
+        #[arg(long, value_name = "STR", default_value = "insta360-x3")]
+        camera: String,
+    },
+    /// Create/configure COLMAP database with rig/frames (§15.1)
+    ColmapInit {
+        #[arg(long, value_name = "DIR")]
+        project: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        database: Option<PathBuf>,
+        #[arg(long, value_name = "FILE")]
+        calibration: Option<PathBuf>,
+    },
+    /// Generate candidate pair graph (§10, §15.3)
+    ColmapPairs {
+        #[arg(long, value_name = "DIR")]
+        project: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        database: Option<PathBuf>,
+        #[arg(long, value_name = "STR", default_value = "imu-geometry")]
+        strategy: String,
+        #[arg(long, default_value_t = 4)]
+        temporal_before: usize,
+        #[arg(long, default_value_t = 8)]
+        temporal_after: usize,
+        #[arg(long, default_value_t = 4)]
+        min_neighbors: usize,
+        #[arg(long)]
+        loop_closure: bool,
+        #[arg(long)]
+        same_frame: Option<String>,
+    },
+    /// Prepare COLMAP database (colmap-prepare alias)
+    ColmapPrepare {
+        #[arg(long, value_name = "DIR")]
+        project: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        masks: Option<PathBuf>,
+    },
+    /// COLMAP feature extraction with masks (§15.2)
+    ColmapFeatures {
+        #[arg(long, value_name = "DIR")]
+        project: PathBuf,
+    },
+    /// COLMAP matching with candidate pairs (§15.4)
+    ColmapMatch {
+        #[arg(long, value_name = "DIR")]
+        project: PathBuf,
+        #[arg(long)]
+        rig_verification: bool,
+    },
+    /// COLMAP mapper (§15.6)
+    ColmapMap {
+        #[arg(long, value_name = "DIR")]
+        project: PathBuf,
+        #[arg(long)]
+        fix_rig: bool,
+    },
+    /// Diagnose COLMAP graph health (§20)
+    ColmapDiagnose {
+        #[arg(long, value_name = "DIR")]
+        project: PathBuf,
+    },
+    /// Legacy extract phase
+    Extract {
+        #[arg(long, value_name = "DIR")]
+        project: PathBuf,
     },
 }
 

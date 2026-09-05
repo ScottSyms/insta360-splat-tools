@@ -1,9 +1,9 @@
-# Insta360 Frames — `insta-keyframes` + `insta-mask`
+# Insta360 Frames — `imu-keyframes` + `scene-mask`
 
 Two Rust CLIs for Insta360 360° capture → reconstruction:
 
-1. **`insta-keyframes`** — IMU-guided keyframe extraction. Timestamps are the primary output: find **when** the camera moved via gyro, validate, and extract synchronized `lens_a`/`lens_b` frames only at those instants. Sits before COLMAP, Nerfstudio, Spirula Studio, Gaussian Splatting.
-2. **`insta-mask`** — High-throughput masking for the selected keyframes. Removes people / operator / shadows / known objects via a tiered pipeline (deterministic → Apple Vision → lightweight detector+ROI → promptable fallback) with temporal propagation. Outputs **masks** (preferred for SfM), not destructive edits.
+1. **`imu-keyframes`** — IMU-guided keyframe extraction. Timestamps are the primary output: find **when** the camera moved via gyro, validate, and extract synchronized `lens_a`/`lens_b` frames only at those instants. Sits before COLMAP, Nerfstudio, Spirula Studio, Gaussian Splatting.
+2. **`scene-mask`** — High-throughput masking for the selected keyframes. Removes people / operator / shadows / known objects via a tiered pipeline (deterministic → Apple Vision → lightweight detector+ROI → promptable fallback) with temporal propagation. Outputs **masks** (preferred for SfM), not destructive edits.
 
 > Specs: [`specification.md`](specification.md) (keyframes) and [`specification2.md`](specification2.md) (masking) — full designs including pipeline, modules, and MVP milestones.
 
@@ -15,12 +15,12 @@ Two Rust CLIs for Insta360 360° capture → reconstruction:
 Insta360 .insv pair
       |
       v
-insta-keyframes  --input-directory ./samples --output ./frames
+imu-keyframes  --input-directory ./samples --output ./frames
       |
       +--> ./frames/manifest.json + frames/000001/lens_a.jpg + lens_b.jpg
       |
       v
-insta-mask --input ./frames --output ./cleaned --remove people --remove shadows
+scene-mask --input ./frames --output ./cleaned --remove people --remove shadows
       |
       +--> ./cleaned/manifest.json + frames/000001/lens_a.mask.png + lens_b.mask.png
       |
@@ -30,7 +30,7 @@ Spirula / COLMAP (respects masks) → Gaussian Splat
 
 ---
 
-## `insta-keyframes` — Features (v0.1 MVP)
+## `imu-keyframes` — Features (v0.1 MVP)
 
 - Paired Insta360 input (`VID_*_00_*.insv` + `VID_*_10_*.insv`, X3 verified, X4/X5 extensible)
 - Trailer magic detection (`8db42d694ccc418790edff439fe026bf`), `telemetry-parser` (git master) behind `TelemetrySource` trait
@@ -40,9 +40,9 @@ Spirula / COLMAP (respects masks) → Gaussian Splat
 - `manifest.json` (versioned), `analysis.json` + `analysis.csv` diagnostics, presets, `tracing`
 - macOS Apple Silicon primary (VideoToolbox via ffmpeg 9), portable core
 
-## `insta-mask` — Features (v0.1 MVP)
+## `scene-mask` — Features (v0.1 MVP)
 
-- Consumes `insta-keyframes` output (`manifest.json` + `frames/`)
+- Consumes `imu-keyframes` output (`manifest.json` + `frames/`)
 - Tiered pipeline per spec §8: **Tier 0 deterministic** (nadir cap, rect/polygon, precomputed PNG) → **Tier 1 Apple Vision** (person segmentation, `VisionPersonSegmenter` trait) → **Tier 2 lightweight detector+ROI** (stub `DummyDetector`/`DummyRoiSegmenter`) → **Tier 3 promptable** (`DummyPromptSegmenter` fallback)
 - Shadow heuristic (§5): expand person mask south, luminance/chroma + spatial connection, `dilate`
 - Temporal propagation (§9): reuse previous mask when `rotation_delta ≤ 8°`, otherwise re-segment
@@ -70,12 +70,12 @@ ffmpeg -version  # 9.x with VideoToolbox
 brew install ffmpeg  # macOS
 
 cargo build --release
-./target/release/insta-keyframes --help
-./target/release/insta-mask --help
+./target/release/imu-keyframes --help
+./target/release/scene-mask --help
 
 # dev
-cargo run --bin insta-keyframes -- --help
-cargo run --bin insta-mask -- --help
+cargo run --bin imu-keyframes -- --help
+cargo run --bin scene-mask -- --help
 ```
 
 Feature gates:
@@ -92,12 +92,12 @@ cargo build --no-default-features    # telemetry-only
 
 Samples: `./samples/` — `VID_20250731_222121_00_019.insv` holds telemetry, `_10` is video-only (X3 pairing, 2880×2880 24 fps, 203.75 s, 4,890 frames).
 
-### `insta-keyframes`
+### `imu-keyframes`
 
 #### Dry-run — tune without decoding
 
 ```bash
-cargo run --bin insta-keyframes -- --input-directory ./samples --output /tmp/dry \
+cargo run --bin imu-keyframes -- --input-directory ./samples --output /tmp/dry \
   analyze --output /tmp/dry
 # /tmp/dry/manifest.json, analysis.json, analysis.csv
 ```
@@ -108,19 +108,19 @@ cargo run --bin insta-keyframes -- --input-directory ./samples --output /tmp/dry
 
 ```bash
 # auto-discover _00/_10
-cargo run --bin insta-keyframes -- --input-directory ./samples --output ./frames
+cargo run --bin imu-keyframes -- --input-directory ./samples --output ./frames
 
 # explicit + tuning
-cargo run --bin insta-keyframes -- --video-a ./samples/VID_20250731_222121_00_019.insv \
+cargo run --bin imu-keyframes -- --video-a ./samples/VID_20250731_222121_00_019.insv \
   --video-b ./samples/VID_20250731_222121_10_019.insv \
   --output ./frames --rotation-threshold 5 --min-interval 300ms --max-interval 2500ms
 
 # sparser (verified: 191 pairs at 10°/500ms/5000ms)
-cargo run --bin insta-keyframes -- --input-directory ./samples --output ./sparse \
+cargo run --bin imu-keyframes -- --input-directory ./samples --output ./sparse \
   --rotation-threshold 10 --min-interval 500ms --max-interval 5000ms
 
 # presets
-cargo run --bin insta-keyframes -- --input-directory ./samples --output ./frames --preset indoor-walk
+cargo run --bin imu-keyframes -- --input-directory ./samples --output ./frames --preset indoor-walk
 # indoor-walk, outdoor-walk, vehicle, tripod-pan, slow-survey, dense-reconstruction
 ```
 
@@ -131,37 +131,37 @@ cargo run --release -- --input-directory ./samples --output ./frames
 # → 414 pairs in ~114 s (release), 3× faster than debug
 ```
 
-### `insta-mask`
+### `scene-mask`
 
-Input is the **output** of `insta-keyframes`:
+Input is the **output** of `imu-keyframes`:
 
 ```bash
 # People only (Vision fast path, CPU fallback on non-macOS)
-cargo run --bin insta-mask -- --input ./frames --output ./cleaned --remove people
+cargo run --bin scene-mask -- --input ./frames --output ./cleaned --remove people
 
 # People + shadows (heuristic fast, --shadow-mode ml is opt-in)
-cargo run --bin insta-mask -- --input ./frames --output ./cleaned \
+cargo run --bin scene-mask -- --input ./frames --output ./cleaned \
   --remove people --remove shadows
 
 # Operator preset (static nadir + Vision + temporal propagation)
-cargo run --bin insta-mask -- --input ./frames --output ./cleaned \
+cargo run --bin scene-mask -- --input ./frames --output ./cleaned \
   --preset insta360-operator
 # or: --preset people-and-shadows, photogrammetry-clean, aggressive-clean
 
 # Known objects (compact detector → ROI, §5/13)
-cargo run --bin insta-mask -- --input ./frames --output ./cleaned \
+cargo run --bin scene-mask -- --input ./frames --output ./cleaned \
   --remove people --remove tripod --remove backpack
 
 # Arbitrary prompt (grounding → promptable segmenter fallback, Tier 3)
-cargo run --bin insta-mask -- --input ./frames --output ./cleaned \
+cargo run --bin scene-mask -- --input ./frames --output ./cleaned \
   --prompt "remove the black tripod"
 
 # Manual masks (Tier 0, §6)
-cargo run --bin insta-mask -- --input ./frames --output ./cleaned \
+cargo run --bin scene-mask -- --input ./frames --output ./cleaned \
   --rect 0.4,0.7,0.2,0.25 --polygon mask.json --mask existing.png
 
 # Preset + options + review
-cargo run --bin insta-mask -- --input ./frames --output ./cleaned \
+cargo run --bin scene-mask -- --input ./frames --output ./cleaned \
   --preset photogrammetry-clean --dilate 6 --review
 # also: --write-clean-images --clean-mode solid|transparent|blur|inpaint
 #       --inference-max-dimension 768 --people-quality fast|balanced|accurate
@@ -173,7 +173,7 @@ Test on a 5-frame subset (as used in CI):
 ```bash
 python3 -c "import json; m=json.load(open('./frames/manifest.json')); m['frames']=m['frames'][:5]; json.dump(m, open('/tmp/small_selected/manifest.json','w'), indent=2)"
 mkdir -p /tmp/small_selected/frames; for i in 000001 000002 000003 000004 000005; do cp -r ./frames/frames/$i /tmp/small_selected/frames/; done
-cargo run --bin insta-mask -- --input /tmp/small_selected --output /tmp/cleaned_small \
+cargo run --bin scene-mask -- --input /tmp/small_selected --output /tmp/cleaned_small \
   --remove people --static-nadir --dilate 0 --verbose
 # → 5 frames, 10 masks, ~40 s debug (decode-bound, 2880² JPEG), 0.2 img/s; release ~3× faster
 ```
@@ -182,10 +182,10 @@ cargo run --bin insta-mask -- --input /tmp/small_selected --output /tmp/cleaned_
 
 ## CLI Reference
 
-### `insta-keyframes`
+### `imu-keyframes`
 
 ```
-insta-keyframes [OPTIONS] --output <DIR> [COMMAND]
+imu-keyframes [OPTIONS] --output <DIR> [COMMAND]
   --video-a <FILE>            First lens .insv
   --video-b <FILE>            Second lens .insv
   --input-directory <DIR>     Dir with paired .insv (auto _00/_10)
@@ -206,11 +206,11 @@ Commands: analyze, preview
 
 `DUR` accepts `300`, `300ms`, `2.5s`.
 
-### `insta-mask`
+### `scene-mask`
 
 ```
-insta-mask --input <DIR> --output <DIR> [OPTIONS]
-  --input <DIR>                Dir from insta-keyframes (manifest.json)
+scene-mask --input <DIR> --output <DIR> [OPTIONS]
+  --input <DIR>                Dir from imu-keyframes (manifest.json)
  -o, --output <DIR>            Output dir for masks + manifest
   --remove <ITEM>              Repeatable: people, operator, shadows, tripod, backpack, chair, vehicle, ...
   --prompt <PROMPT>            Arbitrary text prompt (Tier 3 fallback)
@@ -247,7 +247,7 @@ COLMAP masks: masks/ (inverted=true) — use: colmap feature_extractor --image_p
 
 ## Outputs
 
-### `insta-keyframes`
+### `imu-keyframes`
 
 ```
 output/
@@ -287,7 +287,7 @@ Flat: `frames/000001_a.jpg` with `--flat-naming`.
 }
 ```
 
-### `insta-mask`
+### `scene-mask`
 
 Default (masks preferred; inpainting invention can harm SfM) — **COLMAP-compatible by default**:
 
@@ -344,7 +344,7 @@ Optional: `--write-clean-images --clean-mode transparent|solid|blur|inpaint`.
 
 ## Pipeline
 
-### `insta-keyframes`
+### `imu-keyframes`
 
 ```
 Insta360 files → File validation → Telemetry extraction → Time sync (µs)
@@ -368,7 +368,7 @@ output/{images,manifest,diagnostics}
 
 Traits: `TelemetrySource::samples()`, `FrameExtractor::extract_frame()`, `VisualMotionBackend::compare()`.
 
-### `insta-mask`
+### `scene-mask`
 
 ```
 manifest → image pair → deterministic masks → person segmentation
@@ -379,7 +379,7 @@ manifest → image pair → deterministic masks → person segmentation
 Module map (§17):
 
 ```
-src/bin/insta-mask.rs / src/lib.rs
+src/bin/scene-mask.rs / src/lib.rs
 image/{decode,encode,resize}
 mask/{combine,morphology,feather,static_mask}
 people/{vision}
@@ -397,7 +397,7 @@ Performance tiers (§8): `Tier 0 deterministic (0 ms) → Tier 1 Vision → Tier
 
 ## Configuration Defaults
 
-**`insta-keyframes`:**
+**`imu-keyframes`:**
 
 ```toml
 [selection]
@@ -419,7 +419,7 @@ jpeg_quality = 95
 max_lens_skew_ms = 50  # X3 observed 41.6 ms
 ```
 
-**`insta-mask`:**
+**`scene-mask`:**
 
 ```
 people:       CPU fallback (Vision when macos-vision), quality fast
@@ -437,10 +437,10 @@ Presets: `insta360-operator` (people+shadows+nadir+temporal), `people-only`, `pe
 
 ```bash
 cargo check --bins
-cargo test                         # insta-keyframes: 8 tests (filters, orientation, candidate)
-cargo run --bin insta-keyframes -- --input-directory ./samples --output /tmp/dry analyze
-cargo run --bin insta-mask -- --input /tmp/small_selected --output /tmp/cleaned --preset people-and-shadows --dilate 0
-RUST_LOG=debug cargo run --bin insta-mask -- --input ./frames --output ./cleaned --remove people -vv
+cargo test                         # imu-keyframes: 8 tests (filters, orientation, candidate)
+cargo run --bin imu-keyframes -- --input-directory ./samples --output /tmp/dry analyze
+cargo run --bin scene-mask -- --input /tmp/small_selected --output /tmp/cleaned --preset people-and-shadows --dilate 0
+RUST_LOG=debug cargo run --bin scene-mask -- --input ./frames --output ./cleaned --remove people -vv
 ```
 
 Logging: `INFO` selection/propagation rate, `DEBUG` per-frame `a_frac`/`propagated`, `WARN` skew/missing.

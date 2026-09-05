@@ -2,20 +2,20 @@
 name = "insta-keyframes"
 version = "0.1.0"
 edition = "2021"
-description = "IMU-guided keyframe extractor + high-throughput masking for Insta360 360° video — two Rust CLIs (insta-keyframes, insta-mask) for SfM / Gaussian Splatting"
+description = "IMU-guided keyframe extractor + high-throughput masking for Insta360 360° video — two Rust CLIs (imu-keyframes, scene-mask) for SfM / Gaussian Splatting"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/anomalyco/opencode"
+repository = "https://github.com/ScottSyms/insta360-splat-tools"
 keywords = ["insta360", "photogrammetry", "gaussian-splatting", "sfm", "imu"]
 categories = ["multimedia", "science"]
 
 [[bin]]
-name = "insta-keyframes"
+name = "imu-keyframes"
 path = "src/main.rs"
 
 [[bin]]
-name = "insta-mask"
-path = "src/bin/insta-mask.rs"
+name = "scene-mask"
+path = "src/bin/scene-mask.rs"
 
 [lib]
 name = "insta_keyframes"
@@ -37,6 +37,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rayon = "1.10"
 walkdir = "2"
 tempfile = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = "0.4"
+bitflags = { version = "2", features = ["serde"] }
 
 [features]
 default = ["ffmpeg"]

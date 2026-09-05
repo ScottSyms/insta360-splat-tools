@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Input manifest from insta-keyframes (subset we need).
+/// Input manifest from imu-keyframes (subset we need).
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyframesManifest {
@@ -52,7 +52,7 @@ pub struct KeyframeVisual {
     pub exposure_score: f64,
 }
 
-/// Output manifest for insta-mask per spec §20.
+/// Output manifest for scene-mask per spec §20.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaskManifest {

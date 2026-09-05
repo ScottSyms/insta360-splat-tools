@@ -2,7 +2,7 @@ import Vision
 import AppKit
 import CoreImage
 
-// High-throughput Vision person segmentation helper for insta-mask
+// High-throughput Vision person segmentation helper for scene-mask
 // Usage: vision_person <input.jpg> <output.png> [--quality fast|balanced|accurate]
 let args = CommandLine.arguments
 guard args.count >= 3 else {

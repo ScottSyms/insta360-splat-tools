@@ -14,15 +14,23 @@ use insta_keyframes::objects::Detector;
 use insta_keyframes::objects::prompt::PromptableSegmenter;
 
 #[derive(Debug, Parser)]
-#[command(name = "insta-mask", version, about = "High-throughput mask generation for Insta360 keyframes")]
+#[command(name = "scene-mask", version, about = "High-throughput mask generation for Insta360 keyframes")]
 struct Cli {
-    /// Input directory (output of insta-keyframes) containing manifest.json
+    /// Input directory (output of imu-keyframes) containing manifest.json (legacy)
     #[arg(long, value_name = "DIR")]
-    input: PathBuf,
+    input: Option<PathBuf>,
 
-    /// Output directory for cleaned/masks
+    /// Output directory for cleaned/masks (legacy) or masks when --images is used
     #[arg(long, short = 'o', value_name = "DIR")]
-    output: PathBuf,
+    output: Option<PathBuf>,
+
+    /// Images directory (project/images) for Spec3 colmap-layout
+    #[arg(long, value_name = "DIR")]
+    images: Option<PathBuf>,
+
+    /// COLMAP layout: write masks as masks/cam0/<image>.png with 0=masked (§12.3)
+    #[arg(long)]
+    colmap_layout: bool,
 
     /// Removal targets: people, operator, shadows, tripod, backpack, chair, vehicle, etc. Repeatable.
     #[arg(long, value_name = "ITEM", action = clap::ArgAction::Append)]
@@ -76,6 +84,10 @@ struct Cli {
     #[arg(long)]
     no_temporal: bool,
 
+    /// Temporal propagation threshold degrees (default 8.0, aggressive 15-20)
+    #[arg(long, value_name = "DEG", default_value_t = 8.0)]
+    temporal_threshold: f64,
+
     /// Nadir static mask (operator/tripod cap)
     #[arg(long)]
     static_nadir: bool,
@@ -98,6 +110,14 @@ struct Cli {
     /// COLMAP masks subdirectory name (default "masks")
     #[arg(long, value_name = "DIR", default_value = "masks")]
     colmap_masks_dir: String,
+
+    /// Workers for parallel chunk processing (0=auto, 1=sequential for exact temporal)
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    workers: usize,
+
+    /// Turbo mode: 384 inference, fast quality, no dilate, aggressive temporal (15°)
+    #[arg(long)]
+    turbo: bool,
 
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -135,6 +155,7 @@ struct ResolvedConfig {
     remove_objects: Vec<String>,
     static_nadir: bool,
     temporal: bool,
+    temporal_threshold: f64,
     shadow_mode: String,
     people_quality: VisionQuality,
     dilate: u32,
@@ -143,6 +164,8 @@ struct ResolvedConfig {
     colmap: bool,
     colmap_invert: bool,
     colmap_masks_dir: String,
+    workers: usize,
+    turbo: bool,
 }
 
 fn resolve_config(cli: &Cli) -> ResolvedConfig {
@@ -153,6 +176,7 @@ fn resolve_config(cli: &Cli) -> ResolvedConfig {
         remove_objects: Vec::new(),
         static_nadir: false,
         temporal: !cli.no_temporal,
+        temporal_threshold: cli.temporal_threshold,
         shadow_mode: cli.shadow_mode.clone(),
         people_quality: match cli.people_quality.as_str() {
             "accurate" => VisionQuality::Accurate,
@@ -165,6 +189,8 @@ fn resolve_config(cli: &Cli) -> ResolvedConfig {
         colmap: !cli.no_colmap,
         colmap_invert: !cli.no_colmap_invert,
         colmap_masks_dir: cli.colmap_masks_dir.clone(),
+        workers: cli.workers,
+        turbo: cli.turbo,
     };
 
     // preset defaults
@@ -218,7 +244,97 @@ fn resolve_config(cli: &Cli) -> ResolvedConfig {
         cfg.remove_people = true;
     }
 
+    if cli.turbo {
+        cfg.inference_max_dimension = 384;
+        cfg.people_quality = VisionQuality::Fast;
+        cfg.dilate = 0;
+        cfg.temporal_threshold = 15.0;
+        cfg.colmap = false; // save encode time
+    }
+
     cfg
+}
+
+fn handle_images_mode(
+    images_dir: PathBuf,
+    masks_dir: PathBuf,
+    cfg: &ResolvedConfig,
+    colmap_layout: bool,
+    cli: &Cli,
+) -> Result<()> {
+    use walkdir::WalkDir;
+    let mut image_paths: Vec<PathBuf> = Vec::new();
+    for entry in WalkDir::new(&images_dir).into_iter().filter_map(|e| e.ok()) {
+        let p = entry.path();
+        if p.is_file() {
+            if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                if ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg") || ext.eq_ignore_ascii_case("png") {
+                    image_paths.push(p.to_path_buf());
+                }
+            }
+        }
+    }
+    image_paths.sort();
+    if image_paths.is_empty() {
+        anyhow::bail!("no images found in {}", images_dir.display());
+    }
+    info!("found {} images in {}", image_paths.len(), images_dir.display());
+    std::fs::create_dir_all(&masks_dir)?;
+    // Choose segmenter
+    let segmenter: Box<dyn PersonSegmenter> = if cfg.remove_people || cfg.remove_operator {
+        Box::new(VisionPersonSegmenter::new(cfg.people_quality))
+    } else {
+        Box::new(CpuPersonSegmenter::new())
+    };
+    let shadow_cfg = ShadowConfig { enabled: cfg.remove_shadows, expand_px: 12, darken_threshold: 18, dilate: 3 };
+    let start = std::time::Instant::now();
+    for (idx, img_path) in image_paths.iter().enumerate() {
+        let t0 = std::time::Instant::now();
+        let rel = img_path.strip_prefix(&images_dir).unwrap_or(img_path);
+        // Determine output mask path
+        let out_mask = if colmap_layout {
+            // masks/cam0/00000001.jpg.png
+            masks_dir.join(format!("{}.png", rel.display()))
+        } else {
+            // flat: masks/cam0_00000001.png (legacy)
+            let flat_name = rel.display().to_string().replace('/', "_");
+            masks_dir.join(format!("{}.png", flat_name))
+        };
+        if let Some(parent) = out_mask.parent() { std::fs::create_dir_all(parent)?; }
+        let img = DecodedImage::from_path(img_path)?;
+        let (w, h) = (img.width, img.height);
+        let mut base_masks: Vec<Vec<u8>> = Vec::new();
+        if cfg.static_nadir {
+            base_masks.push(StaticMask::Nadir { radius_ratio: 0.12 }.generate(w, h));
+        }
+        // Person segmentation
+        let mut person_mask = vec![0u8; (w*h) as usize];
+        if cfg.remove_people || cfg.remove_operator {
+            let small = if img.width > cfg.inference_max_dimension || img.height > cfg.inference_max_dimension {
+                let (d, nw, nh, _) = insta_keyframes::image::resize::resize_image(&img.data, w, h, cfg.inference_max_dimension);
+                DecodedImage { width: nw, height: nh, data: d }
+            } else { img.clone() };
+            person_mask = segmenter.segment(&small)?;
+            if person_mask.len() != (w*h) as usize {
+                // upsample if we downsampled
+                person_mask = resize_mask(&person_mask, small.width, small.height, w, h);
+            }
+            base_masks.push(person_mask.clone());
+        }
+        if cfg.remove_shadows && !person_mask.iter().all(|&v| v<128) {
+            let shadow = detect_shadows(&person_mask, &img, &shadow_cfg);
+            base_masks.push(shadow);
+        }
+        // Manual rect etc. could be added
+        let combined = combine_masks(&base_masks, &[], w, h);
+        let final_mask = if cfg.dilate >0 { dilate(&combined, w, h, cfg.dilate) } else { combined };
+        write_mask_png(&final_mask, w, h, &out_mask)?;
+        let dt = t0.elapsed();
+        info!("[{}/{}] {} -> {}  {:.1}%  {}ms", idx+1, image_paths.len(), rel.display(), out_mask.strip_prefix(&masks_dir).unwrap_or(&out_mask).display(), final_mask.iter().filter(|&&v| v>127).count() as f64 / final_mask.len() as f64 * 100.0, dt.as_millis());
+    }
+    let elapsed = start.elapsed();
+    info!("wrote {} masks to {} in {:.1}s ({:.1} img/s)", image_paths.len(), masks_dir.display(), elapsed.as_secs_f64(), image_paths.len() as f64 / elapsed.as_secs_f64().max(0.001));
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -233,9 +349,17 @@ fn main() -> Result<()> {
         .init();
 
     let cfg = resolve_config(&cli);
-    info!("insta-mask preset={:?} people={} operator={} shadows={} nadir={} temporal={} objects={:?}", cfg.preset_name, cfg.remove_people, cfg.remove_operator, cfg.remove_shadows, cfg.static_nadir, cfg.temporal, cfg.remove_objects);
+    info!("scene-mask preset={:?} people={} operator={} shadows={} nadir={} temporal={} objects={:?}", cfg.preset_name, cfg.remove_people, cfg.remove_operator, cfg.remove_shadows, cfg.static_nadir, cfg.temporal, cfg.remove_objects);
 
-    let input_manifest_path = cli.input.join("manifest.json");
+    // Spec3: --images project/images --output project/masks --colmap-layout
+    if let Some(images_dir) = cli.images.clone() {
+        let masks_dir = cli.output.clone().ok_or_else(|| anyhow::anyhow!("--output required with --images"))?;
+        return handle_images_mode(images_dir, masks_dir, &cfg, cli.colmap_layout, &cli);
+    }
+
+    let input_dir = cli.input.clone().ok_or_else(|| anyhow::anyhow!("--input required (or use --images)"))?;
+    let output_dir = cli.output.clone().ok_or_else(|| anyhow::anyhow!("--output required"))?;
+    let input_manifest_path = input_dir.join("manifest.json");
     let manifest_str = std::fs::read_to_string(&input_manifest_path)
         .with_context(|| format!("read input manifest {}", input_manifest_path.display()))?;
     let kf_manifest: KeyframesManifest = serde_json::from_str(&manifest_str)
@@ -243,7 +367,7 @@ fn main() -> Result<()> {
 
     info!("loaded {} frames from {}", kf_manifest.frames.len(), input_manifest_path.display());
 
-    std::fs::create_dir_all(&cli.output).context("create output dir")?;
+    std::fs::create_dir_all(&output_dir).context("create output dir")?;
 
     // Choose segmenter
     let segmenter: Box<dyn PersonSegmenter> = if cfg.remove_people || cfg.remove_operator {
@@ -263,9 +387,12 @@ fn main() -> Result<()> {
 
     let prop_cfg = PropagationConfig {
         enabled: cfg.temporal,
-        max_rotation_deg: 8.0,
+        max_rotation_deg: cfg.temporal_threshold,
         max_translation_px: 24,
     };
+    if cfg.turbo {
+        info!("turbo: inference {} quality {:?} dilate {} temporal_threshold {} colmap={}", cfg.inference_max_dimension, cfg.people_quality, cfg.dilate, cfg.temporal_threshold, cfg.colmap);
+    }
 
     // Prepare per-frame processing
     let start = std::time::Instant::now();
@@ -285,8 +412,8 @@ fn main() -> Result<()> {
     for (idx, entry) in kf_manifest.frames.iter().enumerate() {
         let t_frame = std::time::Instant::now();
         // Resolve source paths relative to input dir
-        let src_a = cli.input.join(&entry.lens_a);
-        let src_b = cli.input.join(&entry.lens_b);
+        let src_a = input_dir.join(&entry.lens_a);
+        let src_b = input_dir.join(&entry.lens_b);
 
         // Check files exist
         if !src_a.exists() {
@@ -333,15 +460,15 @@ fn main() -> Result<()> {
         if can_propagate_a { propagated_count += 1; } else { full_seg_count += 1; }
 
         // Write masks (primary: frames/000001/lens_a.mask.png, 0=retain 255=exclude)
-        let out_a_mask = cli.output.join(format!("frames/{:06}/lens_a.mask.png", entry.id));
-        let out_b_mask = cli.output.join(format!("frames/{:06}/lens_b.mask.png", entry.id));
+        let out_a_mask = output_dir.join(format!("frames/{:06}/lens_a.mask.png", entry.id));
+        let out_b_mask = output_dir.join(format!("frames/{:06}/lens_b.mask.png", entry.id));
         write_mask_png(&mask_a, img_a.width, img_a.height, &out_a_mask)?;
         write_mask_png(&mask_b, img_b.width, img_b.height, &out_b_mask)?;
 
         // COLMAP-compatible masks by default: masks/000001_lens_a.png with same basename, inverted (COLMAP: 0=masked)
         if cfg.colmap {
-            let colmap_a = cli.output.join(format!("{}/{:06}_lens_a.png", cfg.colmap_masks_dir, entry.id));
-            let colmap_b = cli.output.join(format!("{}/{:06}_lens_b.png", cfg.colmap_masks_dir, entry.id));
+            let colmap_a = output_dir.join(format!("{}/{:06}_lens_a.png", cfg.colmap_masks_dir, entry.id));
+            let colmap_b = output_dir.join(format!("{}/{:06}_lens_b.png", cfg.colmap_masks_dir, entry.id));
             let colmap_mask_a = if cfg.colmap_invert { insta_keyframes::mask::invert(&mask_a) } else { mask_a.clone() };
             let colmap_mask_b = if cfg.colmap_invert { insta_keyframes::mask::invert(&mask_b) } else { mask_b.clone() };
             write_mask_png(&colmap_mask_a, img_a.width, img_a.height, &colmap_a)?;
@@ -349,8 +476,8 @@ fn main() -> Result<()> {
         }
 
         // Copy source frames? Default per spec: cleaned/frames/000001/lens_a.jpg etc? Spec says cleaned/frames/.. lens_a.jpg + mask. For MVP, copy source JPEG to output frames dir if not already.
-        let out_a_jpg = cli.output.join(format!("frames/{:06}/lens_a.jpg", entry.id));
-        let out_b_jpg = cli.output.join(format!("frames/{:06}/lens_b.jpg", entry.id));
+        let out_a_jpg = output_dir.join(format!("frames/{:06}/lens_a.jpg", entry.id));
+        let out_b_jpg = output_dir.join(format!("frames/{:06}/lens_b.jpg", entry.id));
         // Only copy if not exists or --write-clean-images handling; but spec default says cleaned/ contains both jpg and mask.
         // We'll copy.
         if !out_a_jpg.exists() {
@@ -363,8 +490,8 @@ fn main() -> Result<()> {
         }
 
         if cli.write_clean_images {
-            let clean_a = cli.output.join(format!("frames/{:06}/lens_a.clean.jpg", entry.id));
-            let clean_b = cli.output.join(format!("frames/{:06}/lens_b.clean.jpg", entry.id));
+            let clean_a = output_dir.join(format!("frames/{:06}/lens_a.clean.jpg", entry.id));
+            let clean_b = output_dir.join(format!("frames/{:06}/lens_b.clean.jpg", entry.id));
             insta_keyframes::image::encode::write_clean_image(&img_a, Some(&mask_a), &clean_a, &cli.clean_mode)?;
             insta_keyframes::image::encode::write_clean_image(&img_b, Some(&mask_b), &clean_b, &cli.clean_mode)?;
         }
@@ -373,10 +500,10 @@ fn main() -> Result<()> {
         prev_masks_a = Some(mask_a.clone());
         prev_masks_b = Some(mask_b.clone());
 
-        let rel_a = out_a_mask.strip_prefix(&cli.output).unwrap_or(&out_a_mask).to_string_lossy().to_string();
-        let rel_b = out_b_mask.strip_prefix(&cli.output).unwrap_or(&out_b_mask).to_string_lossy().to_string();
-        let src_rel_a = path_relative(&cli.input, &src_a);
-        let src_rel_b = path_relative(&cli.input, &src_b);
+        let rel_a = out_a_mask.strip_prefix(&output_dir).unwrap_or(&out_a_mask).to_string_lossy().to_string();
+        let rel_b = out_b_mask.strip_prefix(&output_dir).unwrap_or(&out_b_mask).to_string_lossy().to_string();
+        let src_rel_a = path_relative(&input_dir, &src_a);
+        let src_rel_b = path_relative(&input_dir, &src_b);
 
         mask_frames.push(MaskFrame {
             id: entry.id,
@@ -401,7 +528,7 @@ fn main() -> Result<()> {
     // Write output manifest
     let out_manifest = MaskManifest {
         schema_version: "1.0".to_string(),
-        source_manifest: input_manifest_path.strip_prefix(&cli.output).unwrap_or(&input_manifest_path).to_string_lossy().to_string(),
+        source_manifest: input_manifest_path.strip_prefix(&output_dir).unwrap_or(&input_manifest_path).to_string_lossy().to_string(),
         processing: ProcessingMeta {
             people_backend: segmenter.name().to_string(),
             people_quality: format!("{:?}", cfg.people_quality).to_lowercase(),
@@ -413,7 +540,7 @@ fn main() -> Result<()> {
         },
         frames: mask_frames,
     };
-    let out_manifest_path = cli.output.join("manifest.json");
+    let out_manifest_path = output_dir.join("manifest.json");
     std::fs::write(&out_manifest_path, serde_json::to_string_pretty(&out_manifest)?)?;
     info!("wrote {}", out_manifest_path.display());
 
@@ -425,12 +552,12 @@ fn main() -> Result<()> {
         info!("Propagation rate: {:.1}%", pct);
     }
     if cfg.colmap {
-        info!("COLMAP masks: {}/ (inverted={}) — use: colmap feature_extractor --image_path {}/frames --ImageReader.masks {}/{}", cfg.colmap_masks_dir, cfg.colmap_invert, cli.output.display(), cli.output.display(), cfg.colmap_masks_dir);
+        info!("COLMAP masks: {}/ (inverted={}) — use: colmap feature_extractor --image_path {}/frames --ImageReader.masks {}/{}", cfg.colmap_masks_dir, cfg.colmap_invert, output_dir.display(), output_dir.display(), cfg.colmap_masks_dir);
     }
 
     // Review HTML
     if cli.review {
-        write_review_html(&cli.output, &out_manifest)?;
+        write_review_html(&output_dir, &out_manifest)?;
         info!("wrote review.html");
     }
 
@@ -594,7 +721,7 @@ fn path_relative(base: &Path, target: &Path) -> String {
 fn write_review_html(output: &Path, manifest: &MaskManifest) -> Result<()> {
     let path = output.join("review.html");
     let mut html = String::new();
-    html.push_str(r#"<!doctype html><meta charset="utf-8"><title>insta-mask review</title><style>body{font-family:sans-serif} .row{display:flex;gap:8px;margin:12px 0} img{max-width:280px;max-height:280px;border:1px solid #ccc} .meta{font-size:12px;color:#555}</style><h1>insta-mask review</h1>"#);
+    html.push_str(r#"<!doctype html><meta charset="utf-8"><title>scene-mask review</title><style>body{font-family:sans-serif} .row{display:flex;gap:8px;margin:12px 0} img{max-width:280px;max-height:280px;border:1px solid #ccc} .meta{font-size:12px;color:#555}</style><h1>scene-mask review</h1>"#);
     for f in &manifest.frames {
         let a_src = f.lens_a.source.clone();
         let a_mask = f.lens_a.mask.clone();

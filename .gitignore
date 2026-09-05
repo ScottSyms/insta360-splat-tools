@@ -1,9 +1,14 @@
 /target
 /frames
 /cleaned
+/dataset
+/dataset/
 samples/
 *.insv
 *.tmp
 /tmp/
 .DS_Store
 **/.DS_Store
+*.db
+*.db-shm
+*.db-wal

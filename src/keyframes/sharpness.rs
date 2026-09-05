@@ -1,0 +1,1 @@
+pub fn sharpness_score(_gray: &[u8]) -> f32 { 1.0 }
