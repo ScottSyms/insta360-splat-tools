@@ -77,7 +77,7 @@ pub fn select_candidates(
             if reason.is_empty() {
                 reason = format!("max_interval {}ms", elapsed / 1000);
             } else {
-                reason.push_str(&format!(" + max_interval"));
+                reason.push_str(&" + max_interval".to_string());
             }
         }
 

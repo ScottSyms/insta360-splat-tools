@@ -27,7 +27,7 @@ pub fn detect_shadows(person_mask: &[u8], image: &DecodedImage, cfg: &ShadowConf
 
     // Estimate shadow region: for each person pixel, look downward up to expand_px, include if darker than local median.
     let mut shadow = vec![0u8; (w * h) as usize];
-    let wh = w as usize;
+    let _wh = w as usize;
 
     // Precompute row median approximation via mean for speed? Simplify: global dark check.
     let mean_lum: f32 = gray.iter().map(|&v| v as f32).sum::<f32>() / gray.len() as f32;

@@ -46,10 +46,10 @@ fn probe_file(path: &Path) -> Result<StreamInfo> {
     };
     let duration = ictx.duration();
     // ffmpeg duration is in AV_TIME_BASE (microseconds), -1 if unknown
-    let duration_us = if duration == ffmpeg_next::ffi::AV_NOPTS_VALUE as i64 || duration < 0 {
+    let duration_us = if duration == ffmpeg_next::ffi::AV_NOPTS_VALUE || duration < 0 {
         // fallback to stream duration
         let dur_ts = stream.duration();
-        if dur_ts == ffmpeg_next::ffi::AV_NOPTS_VALUE as i64 || dur_ts < 0 {
+        if dur_ts == ffmpeg_next::ffi::AV_NOPTS_VALUE || dur_ts < 0 {
             0
         } else {
             let tb = stream.time_base();

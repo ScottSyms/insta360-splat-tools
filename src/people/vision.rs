@@ -13,6 +13,12 @@ pub struct CpuPersonSegmenter {
     pub dilate_radius: u32,
 }
 
+impl Default for CpuPersonSegmenter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CpuPersonSegmenter {
     pub fn new() -> Self { Self { dilate_radius: 3 } }
 }
@@ -116,13 +122,13 @@ fn try_vision_helper(image: &DecodedImage, quality: VisionQuality) -> Result<Vec
     let helper = find_vision_helper().ok_or_else(|| anyhow::anyhow!("vision helper not found"))?;
 
     // Write input to temp JPEG
-    let mut input_file = tempfile::Builder::new().suffix(".jpg").tempfile()?;
+    let input_file = tempfile::Builder::new().suffix(".jpg").tempfile()?;
     let rgb = image::RgbImage::from_raw(image.width, image.height, image.data.clone())
         .ok_or_else(|| anyhow::anyhow!("invalid image data"))?;
     // Use image crate to write JPEG
     {
-        use std::io::Seek;
-        let mut tmp_path = input_file.path().to_path_buf();
+        
+        let tmp_path = input_file.path().to_path_buf();
         // Write via image crate
         rgb.save(&tmp_path)?;
         // Now create output temp

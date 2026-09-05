@@ -260,7 +260,7 @@ fn handle_images_mode(
     masks_dir: PathBuf,
     cfg: &ResolvedConfig,
     colmap_layout: bool,
-    cli: &Cli,
+    _cli: &Cli,
 ) -> Result<()> {
     use walkdir::WalkDir;
     let mut image_paths: Vec<PathBuf> = Vec::new();
@@ -443,7 +443,7 @@ fn main() -> Result<()> {
             &cfg,
             segmenter.as_ref(),
             &shadow_cfg,
-            can_propagate_a.then(|| prev_masks_a.as_deref()).flatten(),
+            can_propagate_a.then_some(prev_masks_a.as_deref()).flatten(),
             &cli,
         )?;
 
@@ -453,7 +453,7 @@ fn main() -> Result<()> {
             &cfg,
             segmenter.as_ref(),
             &shadow_cfg,
-            can_propagate_b.then(|| prev_masks_b.as_deref()).flatten(),
+            can_propagate_b.then_some(prev_masks_b.as_deref()).flatten(),
             &cli,
         )?;
 
@@ -664,7 +664,7 @@ fn process_lens(
 fn run_person_segmentation(img: &DecodedImage, cfg: &ResolvedConfig, segmenter: &dyn PersonSegmenter) -> Result<Vec<u8>> {
     // Inference resize per spec §12
     let max_dim = cfg.inference_max_dimension;
-    let (data, rw, rh, scale) = if img.width > max_dim || img.height > max_dim {
+    let (data, rw, rh, _scale) = if img.width > max_dim || img.height > max_dim {
         let (d, nw, nh, s) = insta_keyframes::image::resize::resize_image(&img.data, img.width, img.height, max_dim);
         (d, nw, nh, s)
     } else {

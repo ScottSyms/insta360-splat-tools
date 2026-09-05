@@ -1,4 +1,4 @@
-use crate::geometry::transforms::{angular_separation_deg, camera_forward_world};
+use crate::geometry::transforms::camera_forward_world;
 use nalgebra::UnitQuaternion;
 
 /// FOV overlap estimation §10.5

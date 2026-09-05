@@ -16,7 +16,7 @@ impl FfmpegExtractor {
         Self { path }
     }
 
-    fn decode_at(&self, timestamp_us: i64, output_path: Option<&Path>, preview: bool) -> Result<Option<DecodedFrame>> {
+    fn decode_at(&self, timestamp_us: i64, output_path: Option<&Path>, _preview: bool) -> Result<Option<DecodedFrame>> {
         let path = self.path.clone();
         // Run ffmpeg CLI for robust seek; fallback to ffmpeg-next if needed
         // Use CLI: ffmpeg -y -ss <sec> -i <input> -vframes 1 [-vf scale=...] <output>
@@ -52,13 +52,13 @@ impl FfmpegExtractor {
                     msg: format!("ffmpeg extraction failed at {}s for {}", sec, path.display()),
                 });
             }
-            return Ok(None);
+            Ok(None)
         } else {
             // Preview decode: extract to temp file scaled to 480 width
             let tmp = tempfile::Builder::new()
                 .suffix(".jpg")
                 .tempfile()
-                .map_err(|e| AppError::Io(e))?;
+                .map_err(AppError::Io)?;
             let tmp_path = tmp.path().to_path_buf();
 
             // Use -vf scale=480:-1 for low-res preview
@@ -110,7 +110,7 @@ impl FrameExtractor for FfmpegExtractor {
     fn extract_frame(&self, timestamp_us: i64, output_path: &Path) -> Result<()> {
         // ensure parent dir
         if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| AppError::Io(e))?;
+            std::fs::create_dir_all(parent).map_err(AppError::Io)?;
         }
         self.decode_at(timestamp_us, Some(output_path), false)?;
         Ok(())

@@ -1,12 +1,15 @@
 /target
 /frames
 /cleaned
+/room
 /dataset
 /dataset/
 samples/
 *.insv
 *.tmp
 /tmp/
+__pycache__/
+*.pyc
 .DS_Store
 **/.DS_Store
 *.db

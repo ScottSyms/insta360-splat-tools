@@ -41,7 +41,7 @@ impl OrientationState {
             if angle > 1e-9 {
                 let axis = gyro.normalize();
                 let delta = UnitQuaternion::from_axis_angle(&nalgebra::Unit::new_normalize(axis), angle);
-                q = q * delta;
+                q *= delta;
             }
             orientations.push(IntegratedOrientation {
                 timestamp_us: cur.timestamp_us,

@@ -11,11 +11,10 @@ impl ColmapDatabase {
     pub fn create_or_open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
         // Try COLMAP creator first if binary exists
-        if !path.exists() {
-            if try_colmap_creator(path).is_err() {
+        if !path.exists()
+            && try_colmap_creator(path).is_err() {
                 tracing::warn!("colmap database_creator not available, creating via rusqlite");
             }
-        }
         let conn = Connection::open(path).map_err(|e| anyhow::anyhow!("open {}: {}", path.display(), e))?;
         conn.pragma_update(None, "foreign_keys", true).map_err(|e| anyhow::anyhow!("pragma foreign_keys: {}", e))?;
         conn.busy_timeout(std::time::Duration::from_millis(5000)).map_err(|e| anyhow::anyhow!("busy_timeout: {}", e))?;

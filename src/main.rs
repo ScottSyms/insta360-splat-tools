@@ -6,7 +6,6 @@ mod insta360;
 mod output;
 mod selection;
 mod video;
-mod vision;
 
 use anyhow::Context;
 use clap::Parser;
@@ -374,30 +373,16 @@ fn handle_colmap_init(project: PathBuf, database: Option<PathBuf>, calibration: 
     tracing::info!("colmap-init: project={} db={} calib={}", project.display(), db_path.display(), calib_path.display());
     let cal = insta_keyframes::geometry::calibration::Calibration::load(&calib_path)?;
     let db = insta_keyframes::colmap::database::ColmapDatabase::create_or_open(&db_path)?;
-    // Clear existing rigs/cameras if re-running (avoid duplicate key errors)
-    // For v1, we just ensure at least one rig exists; if already exists, reuse
-    let existing_rigs: i64 = db.conn.query_row("SELECT COUNT(*) FROM rigs", [], |r| r.get(0)).unwrap_or(0);
-    let (cam_ids, rig_id) = if existing_rigs == 0 {
-        let cam_ids = insta_keyframes::colmap::cameras::ensure_cameras(&db.conn, &cal.cameras)?;
-        let rig_id = insta_keyframes::colmap::rigs::ensure_rig_with_sensors(&db.conn, &cam_ids)?;
-        (cam_ids, rig_id)
+    // For feature extraction, only cameras and images are needed; rigs/frames are deferred to mapper
+    // to avoid rig.cc duplicate sensor error during feature extraction.
+    // Check if cameras already exist
+    let existing_cams: i64 = db.conn.query_row("SELECT COUNT(*) FROM cameras", [], |r| r.get(0)).unwrap_or(0);
+    let cam_ids = if existing_cams == 0 {
+        insta_keyframes::colmap::cameras::ensure_cameras(&db.conn, &cal.cameras)?
     } else {
-        // Reuse existing
-        let cam_ids: Vec<i64> = db.conn.prepare("SELECT camera_id FROM cameras")?.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
-        let rig_id: i64 = db.conn.query_row("SELECT rig_id FROM rigs LIMIT 1", [], |r| r.get(0))?;
-        (cam_ids, rig_id)
+        db.conn.prepare("SELECT camera_id FROM cameras")?.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?
     };
-    // Create frames for each image pair (if not already)
-    let images_cam0 = project.join("images/cam0");
-    let existing_frames: i64 = db.conn.query_row("SELECT COUNT(*) FROM frames", [], |r| r.get(0)).unwrap_or(0);
-    let images = if images_cam0.exists() {
-        std::fs::read_dir(&images_cam0)?.count()
-    } else { 0 };
-    if existing_frames == 0 {
-        for _ in 0..images {
-            insta_keyframes::colmap::frames::insert_frame(&db.conn, rig_id)?;
-        }
-    }
+    // Defer rig/frame creation to colmap-map stage (when needed for rig-aware BA)
     // Insert images
     for cam_idx in 0..2 {
         let cam_dir = project.join(format!("images/cam{}", cam_idx));
@@ -409,7 +394,7 @@ fn handle_colmap_init(project: PathBuf, database: Option<PathBuf>, calibration: 
             let _ = insta_keyframes::colmap::images::insert_image(&db.conn, &name, cam_ids[cam_idx]);
         }
     }
-    tracing::info!("colmap-init: {} cameras, rig {}, db {}", cam_ids.len(), rig_id, insta_keyframes::colmap::diagnostics::diagnostics(&db.conn)?);
+    tracing::info!("colmap-init: {} cameras, db {}", cam_ids.len(), insta_keyframes::colmap::diagnostics::diagnostics(&db.conn)?);
     Ok(())
 }
 
