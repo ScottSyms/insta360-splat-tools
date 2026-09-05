@@ -15,26 +15,25 @@ pub fn run_feature_extractor(database: &Path, image_path: &Path, mask_path: Opti
     Ok(())
 }
 
-pub fn run_matcher(database: &Path, pairs: &Path) -> anyhow::Result<()> {
-    // Use sequential matcher with custom pairs via matches_importer or exhaustive with pair list
-    // For v1, use exhaustive_matcher if pairs not supported, else try sequential
+pub fn run_matcher(database: &Path, pairs: &Path, rig_verification: bool) -> anyhow::Result<()> {
+    // §15.4: use COLMAP's custom-pair-list importer against the IMU/geometry-derived
+    // candidate graph, instead of a generic sequential/exhaustive matcher that would
+    // silently ignore the planned pairs (and any cross-lens candidates in them).
+    if !pairs.exists() {
+        anyhow::bail!(
+            "candidate pair list not found at {} — run colmap-pairs before colmap-match",
+            pairs.display()
+        );
+    }
     let mut cmd = std::process::Command::new("colmap");
-    // Try vocab tree with pair list
-    cmd.arg("sequential_matcher")
+    cmd.arg("matches_importer")
         .arg("--database_path").arg(database)
-        .arg("--SequentialMatching.quadratic_overlap").arg("0")
-        .arg("--SequentialMatching.overlap").arg("10");
-    // If pairs file exists, we can use matches_importer alternative; for now just run sequential
-    let _ = pairs;
+        .arg("--match_list_path").arg(pairs)
+        .arg("--match_type").arg("pairs")
+        .arg("--FeatureMatching.rig_verification").arg(if rig_verification { "1" } else { "0" });
     let out = cmd.output()?;
     if !out.status.success() {
-        tracing::warn!("sequential_matcher fallback to exhaustive");
-        let mut cmd2 = std::process::Command::new("colmap");
-        cmd2.arg("exhaustive_matcher").arg("--database_path").arg(database);
-        let out2 = cmd2.output()?;
-        if !out2.status.success() {
-            anyhow::bail!("matcher failed: {}", String::from_utf8_lossy(&out2.stderr));
-        }
+        anyhow::bail!("matches_importer failed: {}", String::from_utf8_lossy(&out.stderr));
     }
     Ok(())
 }

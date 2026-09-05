@@ -33,7 +33,12 @@ pub struct FrameEntry {
     pub lens_b: String,
     pub motion: MotionMeta,
     pub visual: VisualMeta,
+    /// Absolute IMU-integrated rig orientation at capture time, wxyz (§8.2 world_from_rig)
+    #[serde(default = "default_orientation_wxyz")]
+    pub world_from_rig_wxyz: [f64; 4],
 }
+
+fn default_orientation_wxyz() -> [f64; 4] { [1.0, 0.0, 0.0, 0.0] }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MotionMeta {

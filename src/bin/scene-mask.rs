@@ -328,9 +328,13 @@ fn handle_images_mode(
         // Manual rect etc. could be added
         let combined = combine_masks(&base_masks, &[], w, h);
         let final_mask = if cfg.dilate >0 { dilate(&combined, w, h, cfg.dilate) } else { combined };
-        write_mask_png(&final_mask, w, h, &out_mask)?;
+        let removed_pct = final_mask.iter().filter(|&&v| v>127).count() as f64 / final_mask.len() as f64 * 100.0;
+        // final_mask: 0=background/keep, 255=detected-target/exclude. COLMAP wants the opposite
+        // (0=excluded from feature extraction, nonzero=permitted, §12.3), so invert before writing.
+        let colmap_mask = if cfg.colmap_invert { insta_keyframes::mask::invert(&final_mask) } else { final_mask };
+        write_mask_png(&colmap_mask, w, h, &out_mask)?;
         let dt = t0.elapsed();
-        info!("[{}/{}] {} -> {}  {:.1}%  {}ms", idx+1, image_paths.len(), rel.display(), out_mask.strip_prefix(&masks_dir).unwrap_or(&out_mask).display(), final_mask.iter().filter(|&&v| v>127).count() as f64 / final_mask.len() as f64 * 100.0, dt.as_millis());
+        info!("[{}/{}] {} -> {}  {:.1}%  {}ms", idx+1, image_paths.len(), rel.display(), out_mask.strip_prefix(&masks_dir).unwrap_or(&out_mask).display(), removed_pct, dt.as_millis());
     }
     let elapsed = start.elapsed();
     info!("wrote {} masks to {} in {:.1}s ({:.1} img/s)", image_paths.len(), masks_dir.display(), elapsed.as_secs_f64(), image_paths.len() as f64 / elapsed.as_secs_f64().max(0.001));

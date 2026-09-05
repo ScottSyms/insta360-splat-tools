@@ -335,6 +335,11 @@ fn handle_build(
             std::fs::copy(&src_b, images_cam1.join(&name))?;
         }
     }
+    // Capture the real per-frame timestamp + IMU-integrated orientation from the legacy
+    // manifest before cleanup, so keyframes.json below is not just an identity/linear-time stub.
+    let legacy_manifest: Option<output::manifest::Manifest> = std::fs::read_to_string(tmp_out.join("manifest.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
     // Cleanup tmp
     let _ = std::fs::remove_dir_all(&tmp_out);
 
@@ -348,15 +353,18 @@ fn handle_build(
     };
     run_manifest.write(&metadata_dir.join("run.json"))?;
 
-    // Also write keyframes metadata (physical frames)
-    // For v1, create minimal keyframes.json with frame_id, timestamp, orientation stub
+    // Also write keyframes metadata (physical frames), using the real IMU-integrated
+    // orientation and timestamp captured above (§7 Keyframe Metadata Model) rather than
+    // an identity/linear-time stub — this is what the colmap-pairs geometry pruner needs.
     let mut physical_frames = Vec::new();
-    // Load orientations from previous step would require re-parsing; for v1 we stub
     for (idx, _) in frame_dirs.iter().enumerate() {
+        let frame = legacy_manifest.as_ref().and_then(|m| m.frames.get(idx));
+        let timestamp_ns = frame.map(|f| f.timestamp_us * 1000).unwrap_or((idx as i64) * 1_000_000_000);
+        let world_from_rig = frame.map(|f| f.world_from_rig_wxyz).unwrap_or([1.0, 0.0, 0.0, 0.0]);
         physical_frames.push(serde_json::json!({
             "frame_id": idx+1,
-            "timestamp_ns": (idx as i64)*1_000_000_000,
-            "world_from_rig": [1,0,0,0],
+            "timestamp_ns": timestamp_ns,
+            "world_from_rig": world_from_rig,
             "selected": true
         }));
     }
@@ -445,10 +453,33 @@ fn handle_colmap_pairs(
         graph.add(p);
     }
     // Geometry (need world_from_rig, cam_from_rig)
-    // For v1, stub with identity orientations and fisheye FOV 100°
+    // Load the real IMU-integrated per-frame orientation written by `build` (§7/§8.2);
+    // falls back to identity per-frame only if keyframes.json is missing/unreadable.
+    let keyframes_path = project.join("metadata/keyframes.json");
     let mut world_from_rig = std::collections::HashMap::new();
+    let loaded: Vec<serde_json::Value> = std::fs::read_to_string(&keyframes_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    for entry in &loaded {
+        let fid = entry.get("frame_id").and_then(|v| v.as_u64());
+        let wxyz = entry.get("world_from_rig").and_then(|v| v.as_array());
+        if let (Some(fid), Some(wxyz)) = (fid, wxyz) {
+            if wxyz.len() == 4 {
+                let w = wxyz[0].as_f64().unwrap_or(1.0);
+                let x = wxyz[1].as_f64().unwrap_or(0.0);
+                let y = wxyz[2].as_f64().unwrap_or(0.0);
+                let z = wxyz[3].as_f64().unwrap_or(0.0);
+                let q = nalgebra::Quaternion::new(w, x, y, z);
+                world_from_rig.insert(fid, nalgebra::UnitQuaternion::from_quaternion(q));
+            }
+        }
+    }
     for (_, fid, _) in &images {
-        world_from_rig.insert(*fid, nalgebra::UnitQuaternion::identity());
+        world_from_rig.entry(*fid).or_insert_with(nalgebra::UnitQuaternion::identity);
+    }
+    if loaded.is_empty() {
+        tracing::warn!("{} not found or empty — falling back to identity orientation for all frames (cross-lens/overlap pruning will be unreliable)", keyframes_path.display());
     }
     let mut cam_from_rig = std::collections::HashMap::new();
     cam_from_rig.insert(0, nalgebra::UnitQuaternion::identity());
@@ -506,7 +537,7 @@ fn handle_colmap_match(project: PathBuf, rig_verification: bool) -> anyhow::Resu
     let db = project.join("colmap/database.db");
     let pairs = project.join("metadata/candidate_pairs.txt");
     tracing::info!("colmap-match: db={} pairs={} rig_verification={}", db.display(), pairs.display(), rig_verification);
-    insta_keyframes::colmap::runner::run_matcher(&db, &pairs)?;
+    insta_keyframes::colmap::runner::run_matcher(&db, &pairs, rig_verification)?;
     Ok(())
 }
 
@@ -632,6 +663,7 @@ fn build_manifest(
                 angular_velocity_deg_s: c.angular_velocity_deg_s,
                 acceleration_score: c.acceleration_score,
             },
+            world_from_rig_wxyz: [c.world_from_rig.w, c.world_from_rig.i, c.world_from_rig.j, c.world_from_rig.k],
             visual: output::manifest::VisualMeta {
                 flow_score: 0.0,
                 blur_score: if dry_run { 1.0 } else { 0.0 },
@@ -678,6 +710,7 @@ fn build_manifest_with_paths(
                 angular_velocity_deg_s: c.angular_velocity_deg_s,
                 acceleration_score: c.acceleration_score,
             },
+            world_from_rig_wxyz: [c.world_from_rig.w, c.world_from_rig.i, c.world_from_rig.j, c.world_from_rig.k],
             visual: output::manifest::VisualMeta {
                 flow_score: 0.0,
                 blur_score: 1.0,

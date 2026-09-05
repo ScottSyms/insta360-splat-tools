@@ -26,11 +26,10 @@ pub fn geometry_edges(
         for j in (i+1)..images.len() {
             let (a_path, a_fid, a_sensor) = &images[i];
             let (b_path, b_fid, b_sensor) = &images[j];
-            // Same-frame policy §10.3 auto: skip if same frame and fisheye non-overlapping
-            if a_fid == b_fid && a_sensor != b_sensor {
-                // Fisheye opposite → skip (auto)
-                continue;
-            }
+            // Same-frame policy §10.3 "auto": let the calibrated-geometry overlap test below
+            // decide, rather than hard-skipping — X3's ~200° fisheye lenses do have a real
+            // (if narrow) overlap band at 180° separation, and hard-skipping here previously
+            // made this indistinguishable from a real geometry check for every same-frame pair.
             if let (Some(qa), Some(qb)) = (wfc.get(a_path), wfc.get(b_path)) {
                 let overlap = estimated_overlap(qa, qb, fov_half_deg) as f32;
                 if overlap < threshold { continue; }

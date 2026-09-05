@@ -2,6 +2,7 @@ use crate::imu::motion::{angular_distance_deg, angular_velocity_deg_s};
 use crate::imu::orientation::OrientationState;
 use crate::insta360::telemetry::{ImuSample, TimestampUs};
 use crate::selection::policy::SelectionPolicy;
+use nalgebra::UnitQuaternion;
 
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -11,6 +12,8 @@ pub struct Candidate {
     pub angular_velocity_deg_s: f64,
     pub acceleration_score: f64,
     pub reason: String,
+    /// Absolute IMU-integrated rig orientation at this candidate's timestamp (world_from_rig, §8.2)
+    pub world_from_rig: UnitQuaternion<f64>,
 }
 
 pub fn select_candidates(
@@ -41,6 +44,7 @@ pub fn select_candidates(
         angular_velocity_deg_s: 0.0,
         acceleration_score: 0.0,
         reason: "initial".to_string(),
+        world_from_rig: first_orientation,
     });
 
     for sample in samples.iter() {
@@ -103,6 +107,7 @@ pub fn select_candidates(
             angular_velocity_deg_s: ang_vel,
             acceleration_score: accel_score,
             reason,
+            world_from_rig: cur_orientation,
         });
         last_keyframe_ts = ts;
         last_orientation = cur_orientation;
