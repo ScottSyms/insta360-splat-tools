@@ -578,7 +578,7 @@ fn handle_colmap_map(project: PathBuf, fix_rig: bool) -> anyhow::Result<()> {
                                             let key = name.split('/').last().unwrap_or(&name).to_string();
                                             by_frame.entry(key).or_default().push((img_id, cam_id));
                                         }
-                                        let mut frame_ids: Vec<i64> = conn.prepare("SELECT frame_id FROM frames ORDER BY frame_id")
+                                        let frame_ids: Vec<i64> = conn.prepare("SELECT frame_id FROM frames ORDER BY frame_id")
                                             .and_then(|mut s| Ok(s.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>,_>>()?)).unwrap_or_default();
                                         let mut sorted_keys: Vec<_> = by_frame.keys().cloned().collect();
                                         sorted_keys.sort();

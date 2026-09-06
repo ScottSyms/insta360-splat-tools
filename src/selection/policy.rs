@@ -6,8 +6,6 @@ pub struct SelectionPolicy {
     pub minimum_interval_us: i64,
     pub maximum_interval_us: i64,
     pub angular_velocity_threshold_deg_s: Option<f64>,
-    pub visual_enabled: bool,
-    pub minimum_flow_score: f64,
 }
 
 impl From<&Config> for SelectionPolicy {
@@ -17,8 +15,6 @@ impl From<&Config> for SelectionPolicy {
             minimum_interval_us: cfg.selection.minimum_interval_ms * 1000,
             maximum_interval_us: cfg.selection.maximum_interval_ms * 1000,
             angular_velocity_threshold_deg_s: cfg.selection.angular_velocity_threshold_deg_s,
-            visual_enabled: cfg.visual.enabled,
-            minimum_flow_score: cfg.visual.minimum_flow_score,
         }
     }
 }

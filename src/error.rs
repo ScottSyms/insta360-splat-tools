@@ -17,29 +17,17 @@ pub enum AppError {
     #[error("missing IMU telemetry: {0}")]
     MissingImu(String),
 
-    #[error("unsupported telemetry format: {0}")]
-    UnsupportedTelemetry(String),
-
-    #[error("stream synchronization failure: {0}")]
-    Sync(String),
-
     #[error("video decode failure: {0}")]
     Decode(String),
 
     #[error("seek failure at {timestamp_us}us: {msg}")]
     Seek { timestamp_us: i64, msg: String },
 
-    #[error("output write failure: {0}")]
-    Output(String),
-
     #[error("telemetry parse error: {0}")]
     Telemetry(String),
 
     #[error("ffmpeg error: {0}")]
     Ffmpeg(String),
-
-    #[error("{0}")]
-    Other(String),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;

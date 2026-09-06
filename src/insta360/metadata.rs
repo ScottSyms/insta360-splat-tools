@@ -3,15 +3,11 @@ use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct StreamInfo {
-    pub path: String,
     pub width: u32,
     pub height: u32,
-    pub codec_name: String,
     pub frame_rate: f64,
     pub duration_ms: i64,
     pub duration_us: i64,
-    pub creation_time: Option<String>,
-    pub nb_frames: Option<i64>,
 }
 
 impl StreamInfo {
@@ -37,7 +33,6 @@ fn probe_file(path: &Path) -> Result<StreamInfo> {
         .map_err(|e| AppError::Decode(e.to_string()))?;
     let width = decoder.width();
     let height = decoder.height();
-    let codec_name = decoder.codec().map(|c| c.name().to_string()).unwrap_or_else(|| "unknown".to_string());
     let avg_rate = stream.avg_frame_rate();
     let frame_rate = if avg_rate.denominator() == 0 {
         0.0
@@ -60,47 +55,24 @@ fn probe_file(path: &Path) -> Result<StreamInfo> {
         duration
     };
     let duration_ms = duration_us / 1000;
-    let creation_time = ictx
-        .metadata()
-        .get("creation_time")
-        .map(|s| s.to_string())
-        .or_else(|| {
-            stream
-                .metadata()
-                .get("creation_time")
-                .map(|s| s.to_string())
-        });
-    // try to get nb_frames via metadata
-    let nb_frames = stream
-        .metadata()
-        .get("NUMBER_OF_FRAMES")
-        .and_then(|s| s.parse().ok());
 
     Ok(StreamInfo {
-        path: path.display().to_string(),
         width,
         height,
-        codec_name,
         frame_rate,
         duration_ms,
         duration_us,
-        creation_time,
-        nb_frames,
     })
 }
 
 #[cfg(not(feature = "ffmpeg"))]
 fn probe_file(path: &Path) -> Result<StreamInfo> {
-    let meta = std::fs::metadata(path).map_err(|e| AppError::Io(e))?;
+    std::fs::metadata(path).map_err(AppError::Io)?;
     Ok(StreamInfo {
-        path: path.display().to_string(),
         width: 0,
         height: 0,
-        codec_name: "unknown".to_string(),
         frame_rate: 0.0,
         duration_ms: 0,
         duration_us: 0,
-        creation_time: None,
-        nb_frames: None,
     })
 }

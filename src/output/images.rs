@@ -73,5 +73,6 @@ mod tests {
         let root = PathBuf::from("/tmp/out");
         let (a,b) = frame_paths(&root, 2, true);
         assert_eq!(a, PathBuf::from("/tmp/out/frames/000002_a.jpg"));
+        assert_eq!(b, PathBuf::from("/tmp/out/frames/000002_b.jpg"));
     }
 }

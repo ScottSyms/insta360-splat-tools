@@ -1,4 +1,4 @@
-use crate::imu::motion::{angular_distance_deg, angular_velocity_deg_s};
+use crate::imu::motion::{acceleration_magnitude, angular_distance_deg, angular_velocity_deg_s};
 use crate::imu::orientation::OrientationState;
 use crate::insta360::telemetry::{ImuSample, TimestampUs};
 use crate::selection::policy::SelectionPolicy;
@@ -67,7 +67,7 @@ pub fn select_candidates(
         };
         let rotation_delta = angular_distance_deg(&last_orientation, &cur_orientation);
         let ang_vel = angular_velocity_deg_s(&sample.gyro_rad_s);
-        let accel_score = (sample.accel_m_s2[0].powi(2) + sample.accel_m_s2[1].powi(2) + sample.accel_m_s2[2].powi(2)).sqrt() / 9.81;
+        let accel_score = acceleration_magnitude(&sample.accel_m_s2) / 9.81;
 
         let mut triggered = false;
         let mut reason = String::new();
@@ -139,8 +139,6 @@ mod tests {
             minimum_interval_us: 300_000,
             maximum_interval_us: 2_500_000,
             angular_velocity_threshold_deg_s: None,
-            visual_enabled: false,
-            minimum_flow_score: 0.1,
         };
         let cands = select_candidates(&samples, &orientations, &policy, 5_000_000);
         // first at 0, then every ~500ms (5deg at 10deg/s) but min 300ms => ~500ms
@@ -157,8 +155,6 @@ mod tests {
             minimum_interval_us: 300_000,
             maximum_interval_us: 1_000_000,
             angular_velocity_threshold_deg_s: None,
-            visual_enabled: false,
-            minimum_flow_score: 0.1,
         };
         let cands = select_candidates(&samples, &orientations, &policy, 5_000_000);
         // should select roughly every 1s

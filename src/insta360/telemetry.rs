@@ -153,18 +153,3 @@ impl TelemetrySource for Insta360TelemetrySource {
         self.camera_model.clone()
     }
 }
-
-/// Mock source for testing
-pub struct MockTelemetrySource {
-    pub samples: Vec<ImuSample>,
-    pub model: Option<String>,
-}
-
-impl TelemetrySource for MockTelemetrySource {
-    fn samples(&mut self) -> Result<Vec<ImuSample>> {
-        Ok(self.samples.clone())
-    }
-    fn camera_model(&self) -> Option<String> {
-        self.model.clone()
-    }
-}

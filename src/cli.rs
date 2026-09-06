@@ -183,15 +183,6 @@ pub enum Commands {
     },
 }
 
-impl Cli {
-    pub fn effective_video_a(&self) -> Option<&PathBuf> {
-        self.video_a.as_ref()
-    }
-    pub fn effective_video_b(&self) -> Option<&PathBuf> {
-        self.video_b.as_ref()
-    }
-}
-
 pub fn parse_duration_ms(s: &str) -> anyhow::Result<i64> {
     let s = s.trim().to_lowercase();
     if let Some(stripped) = s.strip_suffix("ms") {

@@ -1,17 +1,9 @@
-use super::telemetry::TimestampUs;
 use crate::error::Result;
 use crate::insta360::files::ValidatedPair;
 
 #[derive(Debug, Clone)]
 pub struct SyncResult {
-    /// common start time in us (0 after normalization)
-    pub start_us: TimestampUs,
-    pub end_us: TimestampUs,
     pub duration_us: i64,
-    /// measured lens skew in us
-    pub lens_skew_us: i64,
-    /// max allowable skew
-    pub max_skew_us: i64,
 }
 
 pub fn synchronize(pair: &ValidatedPair, max_skew_ms: i64) -> Result<SyncResult> {
@@ -38,10 +30,6 @@ pub fn synchronize(pair: &ValidatedPair, max_skew_ms: i64) -> Result<SyncResult>
     }
 
     Ok(SyncResult {
-        start_us: 0,
-        end_us: effective_end,
         duration_us: effective_end,
-        lens_skew_us,
-        max_skew_us,
     })
 }

@@ -288,7 +288,13 @@ fn handle_images_mode(
     };
     let shadow_cfg = ShadowConfig { enabled: cfg.remove_shadows, expand_px: 12, darken_threshold: 18, dilate: 3 };
     let start = std::time::Instant::now();
-    for (idx, img_path) in image_paths.iter().enumerate() {
+    let total = image_paths.len();
+    // Each image is fully independent (own decode, mask, write) — process across all cores
+    // instead of one at a time. This was the dominant serial bottleneck (each Vision-helper
+    // subprocess call costs ~300ms+ regardless of image content), so it also dominates
+    // wall-clock time for --colmap-layout runs.
+    let completed = std::sync::atomic::AtomicUsize::new(0);
+    image_paths.par_iter().try_for_each(|img_path| -> Result<()> {
         let t0 = std::time::Instant::now();
         let rel = img_path.strip_prefix(&images_dir).unwrap_or(img_path);
         // Determine output mask path
@@ -334,8 +340,10 @@ fn handle_images_mode(
         let colmap_mask = if cfg.colmap_invert { insta_keyframes::mask::invert(&final_mask) } else { final_mask };
         write_mask_png(&colmap_mask, w, h, &out_mask)?;
         let dt = t0.elapsed();
-        info!("[{}/{}] {} -> {}  {:.1}%  {}ms", idx+1, image_paths.len(), rel.display(), out_mask.strip_prefix(&masks_dir).unwrap_or(&out_mask).display(), removed_pct, dt.as_millis());
-    }
+        let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        info!("[{}/{}] {} -> {}  {:.1}%  {}ms", done, total, rel.display(), out_mask.strip_prefix(&masks_dir).unwrap_or(&out_mask).display(), removed_pct, dt.as_millis());
+        Ok(())
+    })?;
     let elapsed = start.elapsed();
     info!("wrote {} masks to {} in {:.1}s ({:.1} img/s)", image_paths.len(), masks_dir.display(), elapsed.as_secs_f64(), image_paths.len() as f64 / elapsed.as_secs_f64().max(0.001));
     Ok(())
