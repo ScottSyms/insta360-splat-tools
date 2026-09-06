@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import curses
+import re
 import subprocess
 import sys
 import os
@@ -27,6 +28,16 @@ import select
 import time
 import shlex
 from pathlib import Path
+
+# Our own Rust binaries' logger (tracing_subscriber) emits ANSI color codes unconditionally
+# — it doesn't check whether stdout is a real terminal before coloring, so they show up even
+# though we've piped its stdout to read it. curses.addnstr doesn't interpret escape codes
+# (it's not a terminal emulator), so left in, they render as literal "^[[2m..." text in the
+# TUI's body pane instead of doing anything. Strip them before display.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+def strip_ansi(s):
+    return _ANSI_RE.sub("", s)
 
 def run_step(cmd, cwd=None):
     """Echo, time, and execute a command. Pause afterwards."""
@@ -98,7 +109,7 @@ class Tui:
 
     def append_output(self, line):
         for l in line.splitlines() or [""]:
-            self.output_lines.append(l)
+            self.output_lines.append(strip_ansi(l))
         if len(self.output_lines) > 4000:
             self.output_lines = self.output_lines[-4000:]
         self._redraw_body()
