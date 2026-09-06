@@ -300,14 +300,51 @@ fn handle_build(
     std::fs::create_dir_all(&colmap_dir)?;
 
     // Calibration
+    let explicit_calibration = calibration.is_some();
     let calib_path = calibration.unwrap_or_else(|| metadata_dir.join("calibration.json"));
     if !calib_path.exists() {
         // Derive from first frame dimensions if available, else 2880
         let cal = insta_keyframes::geometry::calibration::Calibration::default_x3(2880, 2880);
         cal.save(&calib_path)?;
         tracing::info!("wrote default calibration to {}", calib_path.display());
+    } else if explicit_calibration {
+        // User pointed at this file by name — never second-guess or rewrite it.
+        tracing::info!("using explicit calibration {}", calib_path.display());
     } else {
-        tracing::info!("using calibration {}", calib_path.display());
+        // Auto-discovered path (project/metadata/calibration.json): this file only ever
+        // exists here because a *previous run* of this same default_x3() wrote it, so
+        // "stale" is unambiguous — compare its camera models against what default_x3()
+        // would produce today rather than trusting it just because it's present. Without
+        // this, a project built before a default_x3() change (e.g. the OPENCV ->
+        // OPENCV_FISHEYE fix) silently keeps using the old, wrong model on every rerun,
+        // since nothing else ever rewrites this file — bit twice by exactly this in one
+        // session, once in testing and once for a real user.
+        let fresh = insta_keyframes::geometry::calibration::Calibration::default_x3(2880, 2880);
+        match insta_keyframes::geometry::calibration::Calibration::load(&calib_path) {
+            Ok(existing) => {
+                let stale = existing.cameras.len() != fresh.cameras.len()
+                    || existing.cameras.iter().zip(fresh.cameras.iter()).any(|(e, f)| e.model != f.model);
+                if stale {
+                    let existing_models: Vec<&str> = existing.cameras.iter().map(|c| c.model.as_str()).collect();
+                    let fresh_models: Vec<&str> = fresh.cameras.iter().map(|c| c.model.as_str()).collect();
+                    tracing::warn!(
+                        "{} uses camera model(s) {:?} but this version's default is {:?} — this is an \
+                         auto-generated file from an older build, not a hand-edited calibration \
+                         (those must be passed via --calibration to be preserved). Regenerating it \
+                         fresh. colmap-features/colmap-match/colmap-map must be rerun so their output \
+                         reflects the corrected calibration.",
+                        calib_path.display(), existing_models, fresh_models,
+                    );
+                    fresh.save(&calib_path)?;
+                } else {
+                    tracing::info!("using calibration {}", calib_path.display());
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to parse {}: {e} — regenerating default calibration", calib_path.display());
+                fresh.save(&calib_path)?;
+            }
+        }
     }
     // Run legacy extraction to temp then copy to cam0/cam1 with deterministic names
     // For v1, reuse existing run logic with project as output, then reorganize
