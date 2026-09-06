@@ -134,6 +134,16 @@ pub enum Commands {
         loop_closure: bool,
         #[arg(long)]
         same_frame: Option<String>,
+        /// Max |frame_id delta| considered by the orientation-overlap geometry pass. The
+        /// overlap estimate is rotation-only (§3.4: no metric translation), so for a
+        /// translating (walking) capture it cannot by itself bound candidate growth — an
+        /// unbounded window degenerates to near all-pairs on any capture with limited yaw
+        /// variation. Keeps runtime tractable; raise for captures with more looping/revisits.
+        #[arg(long, default_value_t = 30)]
+        geometry_window: u64,
+        /// Minimum estimated_overlap [0,1] for a geometry/cross-lens candidate pair (§10.5)
+        #[arg(long, default_value_t = 0.6)]
+        geometry_overlap_threshold: f32,
     },
     /// Prepare COLMAP database (colmap-prepare alias)
     ColmapPrepare {

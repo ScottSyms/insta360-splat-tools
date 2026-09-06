@@ -45,8 +45,8 @@ fn main() -> anyhow::Result<()> {
             cli::Commands::ColmapInit { project, database, calibration } => {
                 return handle_colmap_init(project, database, calibration);
             }
-            cli::Commands::ColmapPairs { project, database, strategy, temporal_before, temporal_after, min_neighbors, loop_closure, same_frame } => {
-                return handle_colmap_pairs(project, database, strategy, temporal_before, temporal_after, min_neighbors, loop_closure, same_frame);
+            cli::Commands::ColmapPairs { project, database, strategy, temporal_before, temporal_after, min_neighbors, loop_closure, same_frame, geometry_window, geometry_overlap_threshold } => {
+                return handle_colmap_pairs(project, database, strategy, temporal_before, temporal_after, min_neighbors, loop_closure, same_frame, geometry_window, geometry_overlap_threshold);
             }
             cli::Commands::ColmapPrepare { project, masks } => {
                 return handle_colmap_prepare(project, masks);
@@ -433,6 +433,8 @@ fn handle_colmap_pairs(
     _min_neighbors: usize,
     loop_closure: bool,
     _same_frame: Option<String>,
+    geometry_window: u64,
+    geometry_overlap_threshold: f32,
 ) -> anyhow::Result<()> {
     tracing::info!("colmap-pairs: strategy={} temporal {}/{} loop={}", strategy, temporal_before, temporal_after, loop_closure);
     let images_dir = project.join("images");
@@ -484,7 +486,7 @@ fn handle_colmap_pairs(
     let mut cam_from_rig = std::collections::HashMap::new();
     cam_from_rig.insert(0, nalgebra::UnitQuaternion::identity());
     cam_from_rig.insert(1, nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::y_axis(), std::f64::consts::PI));
-    for p in insta_keyframes::pairs::geometry::geometry_edges(&images, &world_from_rig, &cam_from_rig, 100.0, 0.2) {
+    for p in insta_keyframes::pairs::geometry::geometry_edges(&images, &world_from_rig, &cam_from_rig, 100.0, geometry_overlap_threshold, geometry_window) {
         graph.add(p);
     }
     if loop_closure {

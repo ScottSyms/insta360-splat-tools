@@ -5,12 +5,19 @@ use nalgebra::UnitQuaternion;
 use std::collections::HashMap;
 
 /// Generate geometry edges §10.5 + cross-lens §10.6
+///
+/// `max_frame_delta` bounds |frame_id difference| considered. The overlap estimate is
+/// rotation-only (world_from_rig carries no metric translation, per §3.4), so on a
+/// translating capture with limited yaw variation, angular overlap alone cannot bound
+/// candidate growth — nearly every frame can appear to "face the same way". This window
+/// keeps the pass roughly linear instead of degenerating toward all-pairs O(n^2).
 pub fn geometry_edges(
     images: &[(String, u64, u32)],
     world_from_rig: &HashMap<u64, UnitQuaternion<f64>>,
     cam_from_rig: &HashMap<u32, UnitQuaternion<f64>>,
     fov_half_deg: f64,
     threshold: f32,
+    max_frame_delta: u64,
 ) -> Vec<CandidatePair> {
     let mut out = Vec::new();
     // Build world_from_camera per image
@@ -26,6 +33,9 @@ pub fn geometry_edges(
         for j in (i+1)..images.len() {
             let (a_path, a_fid, a_sensor) = &images[i];
             let (b_path, b_fid, b_sensor) = &images[j];
+            if a_fid.abs_diff(*b_fid) > max_frame_delta {
+                continue;
+            }
             // Same-frame policy §10.3 "auto": let the calibrated-geometry overlap test below
             // decide, rather than hard-skipping — X3's ~200° fisheye lenses do have a real
             // (if narrow) overlap band at 180° separation, and hard-skipping here previously
