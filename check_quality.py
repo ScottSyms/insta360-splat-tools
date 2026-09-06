@@ -82,10 +82,14 @@ def prepare_splat_input(project: Path, best_sparse_dir: Path, staging_dir: Path)
     """
     staging_dir.mkdir(parents=True, exist_ok=True)
     images_link = staging_dir / "images"
-    if not images_link.exists():
-        images_link.symlink_to(
-            os.path.relpath(project / "images", staging_dir), target_is_directory=True
-        )
+    # .exists() follows symlinks, so it's False for a stale/broken one left over from an
+    # earlier run against a since-removed target — which then makes symlink_to() below
+    # fail with FileExistsError (the dirent itself is still there). Check is_symlink() too.
+    if images_link.is_symlink() or images_link.exists():
+        images_link.unlink()
+    images_link.symlink_to(
+        os.path.relpath(project / "images", staging_dir), target_is_directory=True
+    )
     sparse_dir = staging_dir / "sparse"
     sparse_dir.mkdir(exist_ok=True)
     zero_link = sparse_dir / "0"

@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 """
-Full workflow runner: keyframe extraction → masking → matching pair selection → COLMAP → Gaussian Splat
-Times each step, echoes command, totals time. Batch by default, --interactive to pause.
+Full workflow runner: keyframe extraction → masking → matching pair selection → COLMAP →
+undistort → Gaussian Splat (msplat by default, opensplat via --splat-backend). Gates splat
+training on a reconstruction quality check (coverage/fragmentation) and checks the trained
+.ply for NaN gaussians afterward. Batch by default, --interactive to pause between steps.
+
+When run in a terminal, shows a curses TUI: a fixed header (current step, live elapsed/
+total time, the running command line) above a scrolling pane with that command's live
+stdout/stderr. Falls back to plain sequential print output when stdout isn't a terminal
+(redirected to a file/pipe) or with --no-tui.
 
 Usage:
   python3 workflow.py
   python3 workflow.py --project ./room --samples ./samples
   python3 workflow.py --skip-colmap  # skip colmap stages if colmap not installed
-  python3 workflow.py --skip-splat   # skip opensplat training
+  python3 workflow.py --skip-splat   # skip splat training
+  python3 workflow.py --no-tui       # plain print output even in a terminal
 """
 
 import argparse
+import curses
 import subprocess
 import sys
 import os
+import select
 import time
 import shlex
 from pathlib import Path
@@ -31,6 +41,126 @@ def run_step(cmd, cwd=None):
     if result.returncode != 0:
         print(f"  ! Command failed with code {result.returncode}, continuing anyway...")
     return elapsed, result.returncode
+
+
+class Tui:
+    """Fixed header (step name, elapsed/total time, command line) over a scrolling
+    body pane showing the running subprocess's live stdout/stderr, using curses so
+    the header stays pinned while output scrolls beneath it (no new dependency —
+    curses is stdlib, keeping workflow.py's "no pip deps" property)."""
+
+    HEADER_LINES = 4
+
+    def __init__(self, stdscr):
+        self.stdscr = stdscr
+        curses.curs_set(0)
+        stdscr.nodelay(True)
+        self.output_lines = []
+        self.height = self.width = 0
+        self._make_windows()
+
+    def _make_windows(self):
+        self.height, self.width = self.stdscr.getmaxyx()
+        body_h = max(1, self.height - self.HEADER_LINES)
+        self.header_win = curses.newwin(min(self.HEADER_LINES, self.height), self.width, 0, 0)
+        self.body_win = curses.newwin(body_h, self.width, min(self.HEADER_LINES, self.height), 0)
+
+    def _safe_addnstr(self, win, y, x, s, attr=0):
+        w = win.getmaxyx()[1]
+        n = w - x - 1
+        if n <= 0:
+            return
+        try:
+            win.addnstr(y, x, s, n, attr)
+        except curses.error:
+            pass  # writing to the bottom-right cell raises in some terminals; harmless
+
+    def check_resize(self):
+        ch = self.stdscr.getch()
+        while ch != -1:
+            if ch == curses.KEY_RESIZE:
+                curses.update_lines_cols()
+                self._make_windows()
+                self._redraw_body()
+            ch = self.stdscr.getch()
+
+    def set_header(self, step_idx, step_total, title, cmd_str, elapsed, overall_elapsed):
+        w = self.header_win
+        w.erase()
+        self._safe_addnstr(w, 0, 0, f" [{step_idx}/{step_total}] {title}", curses.A_BOLD)
+        if self.HEADER_LINES > 1 and self.height > 1:
+            self._safe_addnstr(w, 1, 0, f" elapsed: {elapsed:7.1f}s    total: {overall_elapsed:8.1f}s")
+        if self.HEADER_LINES > 2 and self.height > 2:
+            self._safe_addnstr(w, 2, 0, f" $ {cmd_str}", curses.A_DIM)
+        if self.HEADER_LINES > 3 and self.height > 3:
+            self._safe_addnstr(w, 3, 0, "-" * self.width)
+        w.noutrefresh()
+
+    def append_output(self, line):
+        for l in line.splitlines() or [""]:
+            self.output_lines.append(l)
+        if len(self.output_lines) > 4000:
+            self.output_lines = self.output_lines[-4000:]
+        self._redraw_body()
+
+    def _redraw_body(self):
+        w = self.body_win
+        w.erase()
+        h = w.getmaxyx()[0]
+        for i, line in enumerate(self.output_lines[-h:]):
+            self._safe_addnstr(w, i, 0, line)
+        w.noutrefresh()
+
+    def refresh(self):
+        curses.doupdate()
+
+    def wait_key(self, msg):
+        self.append_output(msg)
+        self.refresh()
+        self.stdscr.nodelay(False)
+        try:
+            self.stdscr.getch()
+        finally:
+            self.stdscr.nodelay(True)
+
+
+def run_step_tui(cmd, title, tui, step_idx, step_total, overall_start):
+    """Like run_step, but streams the subprocess's output into the TUI's body pane
+    and keeps the header's elapsed-time counter live even during long silent stretches
+    (e.g. COLMAP's rig-verification pass, which prints nothing for many minutes)."""
+    cmd_str = " ".join(shlex.quote(c) for c in cmd)
+    start = time.time()
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+    except OSError as e:
+        tui.append_output(f"! failed to start: {e}")
+        tui.refresh()
+        return 0.0, 127
+
+    while True:
+        tui.check_resize()
+        elapsed = time.time() - start
+        tui.set_header(step_idx, step_total, title, cmd_str, elapsed, time.time() - overall_start)
+        ready, _, _ = select.select([proc.stdout], [], [], 0.2)
+        if ready:
+            line = proc.stdout.readline()
+            if line == "":
+                break  # EOF: process closed stdout (has exited or is about to)
+            tui.append_output(line.rstrip("\n"))
+        tui.refresh()
+
+    proc.wait()
+    elapsed = time.time() - start
+    tui.append_output(f"-> step finished in {elapsed:.1f}s (exit {proc.returncode})")
+    if proc.returncode != 0:
+        tui.append_output(f"! command failed with code {proc.returncode}, continuing anyway...")
+    tui.set_header(step_idx, step_total, title, cmd_str, elapsed, time.time() - overall_start)
+    tui.refresh()
+    return elapsed, proc.returncode
 
 def pause(msg="Press Enter to continue to next step (Ctrl-C to abort)..."):
     # Robust pause: handles \n, \r (^M), raw mode, and non-tty
@@ -88,6 +218,7 @@ def main():
     parser.add_argument("--force", action="store_true", help="Train the splat even if the reconstruction quality check (step 7c) fails, using its best-available sub-model anyway")
     parser.add_argument("--min-coverage", type=float, default=0.9, help="Reconstruction quality gate: minimum fraction of images the best sub-model must register (default 0.9)")
     parser.add_argument("--max-reproj-error", type=float, default=2.0, help="Reconstruction quality gate: max mean reprojection error in px (default 2.0)")
+    parser.add_argument("--no-tui", action="store_true", help="Disable the curses TUI (fixed header + scrolling output pane) even when running in a terminal; plain print output instead")
     args = parser.parse_args()
 
     project = Path(args.project)
@@ -156,10 +287,14 @@ def main():
         # regardless of nesting depth.
         staging_dir.mkdir(parents=True, exist_ok=True)
         images_link = staging_dir / "images"
-        if not images_link.exists():
-            images_link.symlink_to(
-                os.path.relpath(undistorted_dir / "images", staging_dir), target_is_directory=True
-            )
+        # .exists() follows symlinks, so it's False for a stale/broken one left over from
+        # an earlier run against a since-removed target — which then makes symlink_to()
+        # below fail with FileExistsError (the dirent itself is still there).
+        if images_link.is_symlink() or images_link.exists():
+            images_link.unlink()
+        images_link.symlink_to(
+            os.path.relpath(undistorted_dir / "images", staging_dir), target_is_directory=True
+        )
         sparse_dir = staging_dir / "sparse"
         sparse_dir.mkdir(exist_ok=True)
         zero_link = sparse_dir / "0"
@@ -170,7 +305,6 @@ def main():
         )
 
     steps = []
-    total = 0.0
 
     # Step 1: Build (extract + select + geometry + initial colmap layout)
     step1 = imu_bin + ["build", "--input-directory", str(samples), "--project", str(project)]
@@ -279,30 +413,71 @@ def main():
     if calibration:
         print(f"Calibration: {calibration}")
 
-    overall_start = time.time()
-
     interactive = args.interactive or args.pause
-    for title, cmd in steps:
-        print(f"\n\n### {title}")
-        elapsed, code = run_step(cmd)
-        total += elapsed
+
+    def after_step(title, code):
+        """Shared post-step handling for both runners below. Returns (should_stop, message)."""
         if title.startswith("7d") and code == 0:
             prepare_undistorted_splat_input(undistorted_dir, splat_input_undistorted)
         if title.startswith("7c") and code != 0 and not args.force:
-            print(
-                "\n" + "="*78 +
-                "\nSTOPPING: reconstruction quality check failed (see above) — training a "
+            return True, (
+                "STOPPING: reconstruction quality check failed (see above) — training a "
                 "splat from this would very likely reproduce a broken/incoherent result "
                 "(fragmented coverage, or a reprojection error high enough to indicate bad "
                 "geometry). Pass --force to train anyway against the best sub-model found "
                 f"(staged at {splat_input}), or --min-coverage/--max-reproj-error to relax "
-                "the thresholds.\n" + "="*78
+                "the thresholds."
             )
-            break
-        if interactive:
-            pause()
+        return False, None
 
-    overall = time.time() - overall_start
+    def run_all_plain():
+        total = 0.0
+        overall_start = time.time()
+        for title, cmd in steps:
+            print(f"\n\n### {title}")
+            elapsed, code = run_step(cmd)
+            total += elapsed
+            stop, msg = after_step(title, code)
+            if msg:
+                print("\n" + "="*78 + f"\n{msg}\n" + "="*78)
+            if stop:
+                break
+            if interactive:
+                pause()
+        return total, time.time() - overall_start
+
+    def run_all_tui(stdscr):
+        tui = Tui(stdscr)
+        total = 0.0
+        overall_start = time.time()
+        try:
+            for idx, (title, cmd) in enumerate(steps, 1):
+                elapsed, code = run_step_tui(cmd, title, tui, idx, len(steps), overall_start)
+                total += elapsed
+                stop, msg = after_step(title, code)
+                if msg:
+                    tui.append_output("")
+                    tui.append_output("=" * 78)
+                    tui.append_output(msg)
+                    tui.append_output("=" * 78)
+                    tui.refresh()
+                if stop:
+                    break
+                if interactive:
+                    tui.wait_key(" -- step complete, press any key to continue --")
+        except KeyboardInterrupt:
+            pass
+        return total, time.time() - overall_start
+
+    use_tui = sys.stdout.isatty() and not args.no_tui
+    if use_tui:
+        try:
+            total, overall = curses.wrapper(run_all_tui)
+        except curses.error as e:
+            print(f"(TUI unavailable ({e}), falling back to plain output)")
+            total, overall = run_all_plain()
+    else:
+        total, overall = run_all_plain()
 
     print("\n" + "="*78)
     print("Workflow complete")
