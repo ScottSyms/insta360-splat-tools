@@ -89,7 +89,8 @@ imu-keyframes colmap-init/colmap-pairs/colmap-features/colmap-match/colmap-map -
 | **Xcode CLT / Swift** | `6.3.3` (swift-driver 1.148) | macOS only | Apple Vision person segmentation | `xcode-select --install` | Provides `swiftc`; `build.rs` compiles `tools/vision_person.swift` → `vision-person` helper |
 | **Python** | `3.10+` (tested `3.14.7`) | For `workflow.py` | End-to-end runner | `brew install python` | No pip deps; stdlib only (`argparse`, `pathlib`) |
 | **SQLite** | bundled via `rusqlite 0.32` | Yes | `colmap/database.db` | — | `bundled` feature compiles SQLite; no system install needed |
-| **OpenSplat** | `1.2.0` | For splatting | Gaussian Splat training | `pip install opensplat` or `cargo install` / `~/.local/bin/opensplat` | `workflow.py` auto-discovers via `which`; `--skip-splat` to omit |
+| **msplat** | `1.1.4` | For splatting (default) | Metal-accelerated Gaussian Splat training, Apple Silicon | `pipx install "msplat[cli]"` (needs Python 3.12/3.13 — pipx wheels don't yet cover 3.14: `pipx install --python /opt/homebrew/bin/python3.13 "msplat[cli]"`) | `workflow.py` auto-discovers `msplat-train` via `which`/`~/.local/bin`; `--splat-backend opensplat` to use OpenSplat instead; `--skip-splat` to omit |
+| **OpenSplat** | `1.2.0` | For splatting (alternative) | Gaussian Splat training | `pip install opensplat` or `cargo install` / `~/.local/bin/opensplat` | Select with `--splat-backend opensplat`; `workflow.py` auto-discovers via `which` |
 
 Optional / secondary:
 
@@ -107,7 +108,8 @@ ffmpeg -version          # 9.x
 colmap --version         # 4.1.1
 swiftc --version         # 6.3.3
 python3 --version        # 3.10+
-opensplat --help         # 1.2.0 (optional)
+msplat-train --help      # 1.1.4 (optional, default splat backend)
+opensplat --help         # 1.2.0 (optional, --splat-backend opensplat)
 ```
 
 ---

@@ -77,8 +77,9 @@ def main():
     parser.add_argument("--samples", default="./samples", help="Directory containing paired .insv")
     parser.add_argument("--calibration", default=None, help="Optional calibration.json path")
     parser.add_argument("--skip-colmap", action="store_true", help="Skip colmap stages")
-    parser.add_argument("--skip-splat", action="store_true", help="Skip Gaussian Splat training (opensplat)")
-    parser.add_argument("--splat-args", default="", help="Extra args for opensplat (e.g. '--downscale-factor 2 -n 1000')")
+    parser.add_argument("--skip-splat", action="store_true", help="Skip Gaussian Splat training")
+    parser.add_argument("--splat-backend", default="msplat", choices=["msplat", "opensplat"], help="Gaussian Splat trainer to use (default: msplat)")
+    parser.add_argument("--splat-args", default="", help="Extra args for the splat trainer, in its own flag syntax (e.g. opensplat: '--downscale-factor 2 -n 1000', msplat: '--downscale-factor 2 --num-iters 30000')")
     parser.add_argument("--interactive", action="store_true", help="Pause between steps for interactive use (default: batch, no pause)")
     parser.add_argument("--pause", action="store_true", help="Alias for --interactive")
     parser.add_argument("--release", action="store_true", help="Use cargo run --release (faster)")
@@ -122,39 +123,41 @@ def main():
         subprocess.run(["swiftc", "tools/vision_person.swift", "-o", "target/debug/vision-person"])
         subprocess.run(["swiftc", "tools/vision_person.swift", "-o", "target/release/vision-person"])
 
-    def find_opensplat():
-        for p in ["/Users/scottsyms/.local/bin/opensplat", "/opt/homebrew/bin/opensplat", "opensplat"]:
+    def find_binary(names, candidates):
+        for p in candidates:
             if Path(p).exists():
                 return p
-            # try which
-            try:
-                out = subprocess.run(["which", p], capture_output=True, text=True)
-                if out.returncode == 0 and Path(out.stdout.strip()).exists():
-                    return out.stdout.strip()
-            except:
-                pass
-        # fallback to PATH lookup
-        for cand in ["opensplat"]:
+        for cand in names:
             try:
                 out = subprocess.run(["which", cand], capture_output=True, text=True)
-                if out.returncode == 0:
+                if out.returncode == 0 and out.stdout.strip():
                     return out.stdout.strip()
             except:
                 pass
-        return "opensplat"
+        return names[0]
 
-    def prepare_opensplat_project(proj: Path):
-        # Ensure opensplat can find the COLMAP project:
-        # Opensplat expects either <project>/sparse or <project>/colmap/sparse
-        # Our layout is <project>/colmap/sparse/0 and <project>/images
-        # Create symlinks for compatibility: <project>/sparse -> colmap/sparse and <project>/colmap/images -> ../images
+    def find_opensplat():
+        return find_binary(["opensplat"], ["/Users/scottsyms/.local/bin/opensplat", "/opt/homebrew/bin/opensplat"])
+
+    def find_msplat():
+        # Installed via `pipx install msplat[cli]` (see README) — pipx puts the entry point
+        # in ~/.local/bin, which may not be on PATH for a non-interactive shell.
+        return find_binary(["msplat-train"], [str(Path.home() / ".local/bin/msplat-train"), "/opt/homebrew/bin/msplat-train"])
+
+    def prepare_splat_project(proj: Path):
+        # Both opensplat and msplat expect a COLMAP dataset at <input>/sparse/0 + <input>/images.
+        # Our layout is <project>/colmap/sparse/0 and <project>/images. Create symlinks so
+        # <project> itself satisfies that: <project>/sparse -> colmap/sparse (relative to
+        # <project>, i.e. just "colmap/sparse" — NOT proj/"colmap"/"sparse", which previously
+        # produced a target string like "room/colmap/sparse" that resolves to the nonexistent
+        # "room/room/colmap/sparse" once the OS interprets it relative to the symlink's own
+        # directory) and <project>/colmap/images -> ../images, for the colmap-subfolder fallback.
         try:
             sparse_link = proj / "sparse"
             colmap_sparse = proj / "colmap" / "sparse"
             if colmap_sparse.exists() and not sparse_link.exists():
-                # Use symlink if possible, else copy
                 try:
-                    sparse_link.symlink_to(colmap_sparse, target_is_directory=True)
+                    sparse_link.symlink_to(Path("colmap") / "sparse", target_is_directory=True)
                 except:
                     pass
             colmap_images = proj / "colmap" / "images"
@@ -164,7 +167,7 @@ def main():
                 except:
                     pass
         except Exception as e:
-            print(f"  (prepare opensplat project warning: {e})")
+            print(f"  (prepare splat project warning: {e})")
 
     steps = []
     total = 0.0
@@ -200,19 +203,27 @@ def main():
     # Optionally diagnose
     steps.append(("7b — Diagnose", imu_bin + ["colmap-diagnose", "--project", str(project)]))
 
-    # Step 8: Gaussian Splat (opensplat) — unless skipped
+    # Step 8: Gaussian Splat — unless skipped
+    def default_splat_extra(backend, fast):
+        # Flag names differ per trainer: opensplat uses -n, msplat uses --num-iters.
+        iters = "5000" if fast else "30000"
+        downscale = "4" if fast else "2"
+        if backend == "msplat":
+            return ["--downscale-factor", downscale, "--num-iters", iters]
+        return ["--downscale-factor", downscale, "-n", iters]
+
+    def build_splat_cmd(backend, binary, input_dir, output_path, extra):
+        if backend == "msplat":
+            return [binary, "--input", str(input_dir), "--output", str(output_path)] + extra
+        return [binary, str(input_dir), "-o", str(output_path)] + extra
+
     if not args.skip_splat:
-        opensplat_bin = find_opensplat()
+        backend = args.splat_backend
+        splat_bin = find_msplat() if backend == "msplat" else find_opensplat()
         splat_output = project / "splat.ply"
-        splat_extra = shlex.split(args.splat_args) if args.splat_args else []
-        if not splat_extra:
-            # Accelerated: larger downscale + fewer iters for quick preview
-            if accelerate:
-                splat_extra = ["--downscale-factor", "4", "-n", "5000"]
-            else:
-                splat_extra = ["--downscale-factor", "2", "-n", "30000"]
-        splat_cmd = [opensplat_bin, str(project), "-o", str(splat_output)] + splat_extra
-        steps.append(("8/8 — Gaussian Splat (opensplat)" + (" [fast]" if accelerate else ""), splat_cmd))
+        splat_extra = shlex.split(args.splat_args) if args.splat_args else default_splat_extra(backend, accelerate)
+        splat_cmd = build_splat_cmd(backend, splat_bin, project, splat_output, splat_extra)
+        steps.append((f"8/8 — Gaussian Splat ({backend})" + (" [fast]" if accelerate else ""), splat_cmd))
 
     if args.skip_colmap:
         # Keep only build + mask + splat (if not skipped), but splat needs colmap so skip it too if colmap skipped
@@ -231,14 +242,15 @@ def main():
     interactive = args.interactive or args.pause
     for title, cmd in steps:
         print(f"\n\n### {title}")
-        # Prepare for opensplat: ensure symlinks for COLMAP layout
+        # Prepare for the splat trainer: ensure symlinks for COLMAP layout
         if "Splat" in title:
-            prepare_opensplat_project(project)
-            # Try project root first, fallback to colmap subfolder if Invalid project folder
+            prepare_splat_project(project)
+            # Try project root first, fallback to colmap subfolder if that layout wasn't found
             elapsed, code = run_step(cmd)
             if code != 0:
-                # Check if error was Invalid project folder, try colmap subfolder
-                alt_cmd = [cmd[0], str(project / "colmap"), "-o", str(project / "splat.ply")] + (shlex.split(args.splat_args) if args.splat_args else ["--downscale-factor", "2", "-n", "30000"])
+                backend = args.splat_backend
+                alt_extra = shlex.split(args.splat_args) if args.splat_args else default_splat_extra(backend, accelerate)
+                alt_cmd = build_splat_cmd(backend, cmd[0], project / "colmap", project / "splat.ply", alt_extra)
                 print(f"\n  (trying fallback: {' '.join(shlex.quote(c) for c in alt_cmd)})")
                 elapsed2, code2 = run_step(alt_cmd)
                 elapsed = elapsed2
