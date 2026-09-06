@@ -85,6 +85,9 @@ def main():
     parser.add_argument("--release", action="store_true", help="Use cargo run --release (faster)")
     parser.add_argument("--fast", action="store_true", help="Accelerated: Turbo + workers + downscale (fastest, slight quality loss)")
     parser.add_argument("--turbo", action="store_true", help="Alias for --fast")
+    parser.add_argument("--force", action="store_true", help="Train the splat even if the reconstruction quality check (step 7c) fails, using its best-available sub-model anyway")
+    parser.add_argument("--min-coverage", type=float, default=0.9, help="Reconstruction quality gate: minimum fraction of images the best sub-model must register (default 0.9)")
+    parser.add_argument("--max-reproj-error", type=float, default=2.0, help="Reconstruction quality gate: max mean reprojection error in px (default 2.0)")
     args = parser.parse_args()
 
     project = Path(args.project)
@@ -144,31 +147,6 @@ def main():
         # in ~/.local/bin, which may not be on PATH for a non-interactive shell.
         return find_binary(["msplat-train"], [str(Path.home() / ".local/bin/msplat-train"), "/opt/homebrew/bin/msplat-train"])
 
-    def prepare_splat_project(proj: Path):
-        # Both opensplat and msplat expect a COLMAP dataset at <input>/sparse/0 + <input>/images.
-        # Our layout is <project>/colmap/sparse/0 and <project>/images. Create symlinks so
-        # <project> itself satisfies that: <project>/sparse -> colmap/sparse (relative to
-        # <project>, i.e. just "colmap/sparse" — NOT proj/"colmap"/"sparse", which previously
-        # produced a target string like "room/colmap/sparse" that resolves to the nonexistent
-        # "room/room/colmap/sparse" once the OS interprets it relative to the symlink's own
-        # directory) and <project>/colmap/images -> ../images, for the colmap-subfolder fallback.
-        try:
-            sparse_link = proj / "sparse"
-            colmap_sparse = proj / "colmap" / "sparse"
-            if colmap_sparse.exists() and not sparse_link.exists():
-                try:
-                    sparse_link.symlink_to(Path("colmap") / "sparse", target_is_directory=True)
-                except:
-                    pass
-            colmap_images = proj / "colmap" / "images"
-            if not colmap_images.exists() and (proj / "images").exists():
-                try:
-                    colmap_images.symlink_to(Path("..") / "images", target_is_directory=True)
-                except:
-                    pass
-        except Exception as e:
-            print(f"  (prepare splat project warning: {e})")
-
     steps = []
     total = 0.0
 
@@ -203,6 +181,18 @@ def main():
     # Optionally diagnose
     steps.append(("7b — Diagnose", imu_bin + ["colmap-diagnose", "--project", str(project)]))
 
+    # Catches a bad reconstruction (low coverage, fragmented into disconnected sub-models)
+    # before it gets silently fed to a splat trainer. Also stages splat_input/ so the
+    # trainer (which always reads <input>/sparse/0, with no flag to pick a different
+    # sub-model) actually points at whichever sub-model is best, not just index 0.
+    splat_input = project / "splat_input"
+    steps.append((
+        "7c — COLMAP reconstruction quality check",
+        [sys.executable, "check_quality.py", "reconstruction", "--project", str(project),
+         "--min-coverage", str(args.min_coverage), "--max-reproj-error", str(args.max_reproj_error),
+         "--prepare-input", str(splat_input)],
+    ))
+
     # Step 8: Gaussian Splat — unless skipped
     def default_splat_extra(backend, fast):
         # Flag names differ per trainer: opensplat uses -n, msplat uses --num-iters.
@@ -222,15 +212,20 @@ def main():
         splat_bin = find_msplat() if backend == "msplat" else find_opensplat()
         splat_output = project / "splat.ply"
         splat_extra = shlex.split(args.splat_args) if args.splat_args else default_splat_extra(backend, accelerate)
-        splat_cmd = build_splat_cmd(backend, splat_bin, project, splat_output, splat_extra)
+        splat_cmd = build_splat_cmd(backend, splat_bin, splat_input, splat_output, splat_extra)
         steps.append((f"8/8 — Gaussian Splat ({backend})" + (" [fast]" if accelerate else ""), splat_cmd))
+        # Catches a trainer that "succeeds" (normal exit code, normal-sized file) but wrote
+        # majority-NaN gaussians because optimization diverged — invisible from the exit
+        # code or file size alone, only visible by actually looking at the vertex data.
+        steps.append((
+            "8b — Gaussian quality check",
+            [sys.executable, "check_quality.py", "splat", str(splat_output)],
+        ))
 
     if args.skip_colmap:
-        # Keep only build + mask + splat (if not skipped), but splat needs colmap so skip it too if colmap skipped
-        steps = [s for s in steps if "COLMAP" not in s[0] and "Diagnose" not in s[0] and "Splat" not in s[0]]
-        # Re-add splat only if explicitly not skipped and colmap was skipped? For now keep only build+mask
-        if not args.skip_splat and not args.skip_colmap:
-            pass  # already handled
+        # Keep only build + mask — splat and its quality check both need colmap output,
+        # so they're skipped too (matched on "Gaussian", which both step titles contain).
+        steps = [s for s in steps if "colmap" not in s[0].lower() and "Diagnose" not in s[0] and "Gaussian" not in s[0]]
 
     print(f"\nFull workflow: {len(steps)} steps")
     print(f"Project: {project}   Samples: {samples}")
@@ -242,22 +237,19 @@ def main():
     interactive = args.interactive or args.pause
     for title, cmd in steps:
         print(f"\n\n### {title}")
-        # Prepare for the splat trainer: ensure symlinks for COLMAP layout
-        if "Splat" in title:
-            prepare_splat_project(project)
-            # Try project root first, fallback to colmap subfolder if that layout wasn't found
-            elapsed, code = run_step(cmd)
-            if code != 0:
-                backend = args.splat_backend
-                alt_extra = shlex.split(args.splat_args) if args.splat_args else default_splat_extra(backend, accelerate)
-                alt_cmd = build_splat_cmd(backend, cmd[0], project / "colmap", project / "splat.ply", alt_extra)
-                print(f"\n  (trying fallback: {' '.join(shlex.quote(c) for c in alt_cmd)})")
-                elapsed2, code2 = run_step(alt_cmd)
-                elapsed = elapsed2
-                code = code2
-        else:
-            elapsed, code = run_step(cmd)
+        elapsed, code = run_step(cmd)
         total += elapsed
+        if title.startswith("7c") and code != 0 and not args.force:
+            print(
+                "\n" + "="*78 +
+                "\nSTOPPING: reconstruction quality check failed (see above) — training a "
+                "splat from this would very likely reproduce a broken/incoherent result "
+                "(fragmented coverage, or a reprojection error high enough to indicate bad "
+                "geometry). Pass --force to train anyway against the best sub-model found "
+                f"(staged at {splat_input}), or --min-coverage/--max-reproj-error to relax "
+                "the thresholds.\n" + "="*78
+            )
+            break
         if interactive:
             pause()
 
@@ -269,7 +261,7 @@ def main():
     print(f"  Total time: {overall:.1f}s  ({overall/60:.1f} min)")
     print(f"  Sum of step times: {total:.1f}s")
     print(f"  Project: {project}")
-    print(f"  Next: check {project}/colmap/sparse/0/ and {project}/masks/cam0/")
+    print(f"  Next: check {splat_input}/sparse/0 (symlinked to the best sub-model) and {project}/masks/cam0/")
     print("="*78)
 
 if __name__ == "__main__":
