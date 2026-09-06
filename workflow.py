@@ -66,8 +66,15 @@ class Tui:
         self.stdscr = stdscr
         curses.curs_set(0)
         stdscr.nodelay(True)
+        stdscr.keypad(True)
         self.output_lines = []
         self.height = self.width = 0
+        # Scrollback: `follow=True` always shows the latest lines (auto-scrolls as output
+        # arrives); scrolling up sets follow=False and anchors `top` (an absolute index into
+        # output_lines) so the view stays put while more output arrives below it, instead of
+        # sliding around under you — scrolling back down to the bottom resumes following.
+        self.follow = True
+        self.top = 0
         self._make_windows()
 
     def _make_windows(self):
@@ -86,13 +93,32 @@ class Tui:
         except curses.error:
             pass  # writing to the bottom-right cell raises in some terminals; harmless
 
-    def check_resize(self):
+    def scroll(self, delta):
+        h = self.body_win.getmaxyx()[0]
+        n = len(self.output_lines)
+        max_top = max(0, n - h)
+        if self.follow:
+            self.top = max_top
+            self.follow = False
+        self.top = max(0, min(self.top + delta, max_top))
+        if self.top >= max_top:
+            self.follow = True  # scrolled back down to the live edge: resume following
+        self._redraw_body()
+
+    def scroll_to_top(self):
+        self.follow = False
+        self.top = 0
+        self._redraw_body()
+
+    def scroll_to_bottom(self):
+        self.follow = True
+        self._redraw_body()
+
+    def handle_input(self):
+        """Drain all pending keypresses: resize events and scrollback navigation."""
         ch = self.stdscr.getch()
         while ch != -1:
-            if ch == curses.KEY_RESIZE:
-                curses.update_lines_cols()
-                self._make_windows()
-                self._redraw_body()
+            self._dispatch_scroll_key(ch)
             ch = self.stdscr.getch()
 
     def set_header(self, step_idx, step_total, title, cmd_str, elapsed, overall_elapsed):
@@ -104,35 +130,115 @@ class Tui:
         if self.HEADER_LINES > 2 and self.height > 2:
             self._safe_addnstr(w, 2, 0, f" $ {cmd_str}", curses.A_DIM)
         if self.HEADER_LINES > 3 and self.height > 3:
-            self._safe_addnstr(w, 3, 0, "-" * self.width)
+            if self.follow:
+                self._safe_addnstr(w, 3, 0, "-" * self.width)
+            else:
+                self._safe_addnstr(
+                    w, 3, 0,
+                    f"-- scrolled back (↑/↓/PgUp/PgDn/g/G) — End or G to resume following --".ljust(self.width),
+                    curses.A_REVERSE,
+                )
         w.noutrefresh()
 
     def append_output(self, line):
         for l in line.splitlines() or [""]:
             self.output_lines.append(strip_ansi(l))
         if len(self.output_lines) > 4000:
-            self.output_lines = self.output_lines[-4000:]
+            drop = len(self.output_lines) - 4000
+            self.output_lines = self.output_lines[drop:]
+            if not self.follow:
+                # Keep the anchored view pointed at the same logical lines, not whatever
+                # now sits at the same numeric index after older history got dropped.
+                self.top = max(0, self.top - drop)
         self._redraw_body()
 
     def _redraw_body(self):
         w = self.body_win
         w.erase()
         h = w.getmaxyx()[0]
-        for i, line in enumerate(self.output_lines[-h:]):
+        n = len(self.output_lines)
+        if self.follow:
+            self.top = max(0, n - h)
+        else:
+            self.top = max(0, min(self.top, max(0, n - h)))
+        for i, line in enumerate(self.output_lines[self.top:self.top + h]):
             self._safe_addnstr(w, i, 0, line)
         w.noutrefresh()
 
     def refresh(self):
         curses.doupdate()
 
+    _SCROLL_KEYS = {curses.KEY_RESIZE, curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE,
+                    curses.KEY_NPAGE, curses.KEY_HOME, curses.KEY_END,
+                    ord('k'), ord('j'), ord('g'), ord('G'), 27}
+
     def wait_key(self, msg):
+        """Block until a "real" key is pressed — scroll/resize keys are handled in place
+        instead of being treated as "continue", so you can scroll while paused."""
         self.append_output(msg)
         self.refresh()
         self.stdscr.nodelay(False)
         try:
-            self.stdscr.getch()
+            while True:
+                ch = self.stdscr.getch()
+                if ch not in self._SCROLL_KEYS:
+                    return
+                self._dispatch_scroll_key(ch)
+                self.refresh()
         finally:
             self.stdscr.nodelay(True)
+
+    # Under nodelay (non-blocking) mode, ncurses doesn't do its usual wait-for-more-bytes
+    # escape-sequence recognition — it just hands back each raw byte from its own getch()
+    # call, so a real arrow-key press ("\x1b[A") arrives as three separate keys (27, 91, 65)
+    # instead of one curses.KEY_UP (confirmed with a pty-injected keypress: without this,
+    # every arrow/PgUp/PgDn/Home/End press was silently swallowed as three unrecognized
+    # keys). The follow-up bytes of a genuine sequence still arrive essentially immediately
+    # (the terminal driver writes them as one chunk), so polling getch() again right away —
+    # still non-blocking — reliably catches them if they're there, and returns -1 at once
+    # if this really was just a bare Escape press.
+    _ESCAPE_SEQUENCES = {
+        "[A": curses.KEY_UP, "[B": curses.KEY_DOWN,
+        "[5~": curses.KEY_PPAGE, "[6~": curses.KEY_NPAGE,
+        "[H": curses.KEY_HOME, "[1~": curses.KEY_HOME, "OH": curses.KEY_HOME,
+        "[F": curses.KEY_END, "[4~": curses.KEY_END, "OF": curses.KEY_END,
+    }
+
+    def _read_escape_sequence(self):
+        seq = ""
+        for _ in range(6):
+            ch = self.stdscr.getch()
+            if ch == -1 or not (0 <= ch < 256):
+                break
+            seq += chr(ch)
+            resolved = self._ESCAPE_SEQUENCES.get(seq)
+            if resolved is not None:
+                return resolved
+        return None
+
+    def _dispatch_scroll_key(self, ch):
+        h = self.body_win.getmaxyx()[0]
+        if ch == 27:  # ESC: try to resolve a full arrow/PgUp/PgDn/Home/End sequence
+            resolved = self._read_escape_sequence()
+            if resolved is None:
+                return  # bare Escape, or a sequence we don't recognize: ignore
+            ch = resolved
+        if ch == curses.KEY_RESIZE:
+            curses.update_lines_cols()
+            self._make_windows()
+            self._redraw_body()
+        elif ch in (curses.KEY_UP, ord('k')):
+            self.scroll(-1)
+        elif ch in (curses.KEY_DOWN, ord('j')):
+            self.scroll(1)
+        elif ch == curses.KEY_PPAGE:
+            self.scroll(-(max(1, h - 1)))
+        elif ch == curses.KEY_NPAGE:
+            self.scroll(max(1, h - 1))
+        elif ch in (curses.KEY_HOME, ord('g')):
+            self.scroll_to_top()
+        elif ch in (curses.KEY_END, ord('G')):
+            self.scroll_to_bottom()
 
 
 def run_step_tui(cmd, title, tui, step_idx, step_total, overall_start):
@@ -153,7 +259,7 @@ def run_step_tui(cmd, title, tui, step_idx, step_total, overall_start):
         return 0.0, 127
 
     while True:
-        tui.check_resize()
+        tui.handle_input()
         elapsed = time.time() - start
         tui.set_header(step_idx, step_total, title, cmd_str, elapsed, time.time() - overall_start)
         ready, _, _ = select.select([proc.stdout], [], [], 0.2)
@@ -477,7 +583,16 @@ def main():
                 if interactive:
                     tui.wait_key(" -- step complete, press any key to continue --")
         except KeyboardInterrupt:
-            pass
+            tui.append_output("")
+            tui.append_output("Aborted by user.")
+        # Without this, curses.wrapper tears down the alternate screen (and everything
+        # you'd want to scroll back through) the instant the loop above ends — there'd be
+        # nothing left on screen to actually scroll.
+        tui.append_output("")
+        tui.append_output("=" * 78)
+        tui.append_output("Run finished — press any key to exit (↑/↓/PgUp/PgDn/g/G to scroll)")
+        tui.refresh()
+        tui.wait_key("")
         return total, time.time() - overall_start
 
     use_tui = sys.stdout.isatty() and not args.no_tui
