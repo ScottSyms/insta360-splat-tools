@@ -55,11 +55,31 @@ impl Calibration {
     }
 
     /// Default Insta360 X3 dual fisheye: cam0 forward, cam1 backward (180° yaw)
-    /// Uses OPENCV (8 params, widely supported by COLMAP + opensplat) as default
-    /// for maximum compatibility. For true fisheye distortion, use OPENCV_FISHEYE via
-    /// custom calibration.json (8 params) — note opensplat 1.2 currently reports
-    /// "Unsupported camera model: 5" for OPENCV_FISHEYE, so OPENCV is the safe default.
+    ///
+    /// Uses OPENCV_FISHEYE (equidistant-style, 8 params: fx,fy,cx,cy,k1,k2,k3,k4). Each
+    /// lens is a genuine ~200° FOV fisheye; OPENCV (rectilinear + low-order distortion) is
+    /// undefined beyond 180° and severely wrong well before that, which corrupts epipolar
+    /// geometry and feature reprojection near the frame edges — this was traced (via a
+    /// direct .ply inspection) to a majority of gaussians ending up NaN when training a
+    /// splat from an OPENCV-model reconstruction: gradient-based optimization diverging on
+    /// degenerate depth/reprojection geometry, not a trainer-quality issue.
+    ///
+    /// Initial focal length is a physically-motivated equidistant-fisheye estimate —
+    /// image_radius / half_fov_rad, assuming the ~200° FOV circle roughly fills the square
+    /// frame and half_fov ~= 100° — rather than the previous width/2 guess (which had no
+    /// justification for *any* lens model and was closer to a ~90°-half-angle pinhole
+    /// assumption). It's a starting point for bundle adjustment to refine, not a
+    /// calibrated value; k1..k4 start at 0 for the same reason.
+    ///
+    /// OPENCV_FISHEYE isn't supported by opensplat 1.2 or msplat 1.1.4's COLMAP loaders
+    /// (both error on camera model id 5) — colmap-map's output must be run through `colmap
+    /// image_undistorter` first to get a PINHOLE reconstruction + undistorted images
+    /// before either trainer can consume it.
     pub fn default_x3(width: u32, height: u32) -> Self {
+        let half_fov_rad: f64 = 100.0_f64.to_radians();
+        let focal = (width.max(height) as f64 / 2.0) / half_fov_rad;
+        let cx = width as f64 / 2.0;
+        let cy = height as f64 / 2.0;
         Self {
             version: 1,
             rig: "insta360-x3".to_string(),
@@ -69,17 +89,17 @@ impl Calibration {
                 CameraCalibration {
                     sensor_id: 0,
                     name: "cam0".to_string(),
-                    model: "OPENCV".to_string(),
+                    model: "OPENCV_FISHEYE".to_string(),
                     width, height,
-                    params: vec![width as f64*0.5, height as f64*0.5, width as f64/2.0, height as f64/2.0, 0.0,0.0,0.0,0.0],
+                    params: vec![focal, focal, cx, cy, 0.0,0.0,0.0,0.0],
                     camera_from_rig: Transform { rotation_wxyz: [1.0,0.0,0.0,0.0], translation_m: [0.0,0.0,0.0] },
                 },
                 CameraCalibration {
                     sensor_id: 1,
                     name: "cam1".to_string(),
-                    model: "OPENCV".to_string(),
+                    model: "OPENCV_FISHEYE".to_string(),
                     width, height,
-                    params: vec![width as f64*0.5, height as f64*0.5, width as f64/2.0, height as f64/2.0, 0.0,0.0,0.0,0.0],
+                    params: vec![focal, focal, cx, cy, 0.0,0.0,0.0,0.0],
                     camera_from_rig: Transform { rotation_wxyz: [0.0,0.0,1.0,0.0], translation_m: [0.0,0.0,0.0] }, // 180° yaw
                 },
             ],

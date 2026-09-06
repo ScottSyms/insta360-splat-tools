@@ -147,6 +147,28 @@ def main():
         # in ~/.local/bin, which may not be on PATH for a non-interactive shell.
         return find_binary(["msplat-train"], [str(Path.home() / ".local/bin/msplat-train"), "/opt/homebrew/bin/msplat-train"])
 
+    def prepare_undistorted_splat_input(undistorted_dir: Path, staging_dir: Path):
+        # `colmap image_undistorter --output_type COLMAP` writes cameras.bin/images.bin/
+        # points3D.bin directly under <undistorted_dir>/sparse (no "0" subdirectory), and
+        # images under <undistorted_dir>/images — neither matches what a trainer expects
+        # (<input>/sparse/0 + <input>/images) on its own. Stage a directory that does, using
+        # os.path.relpath (not hand-counted ".." chains) so the symlink target is correct
+        # regardless of nesting depth.
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        images_link = staging_dir / "images"
+        if not images_link.exists():
+            images_link.symlink_to(
+                os.path.relpath(undistorted_dir / "images", staging_dir), target_is_directory=True
+            )
+        sparse_dir = staging_dir / "sparse"
+        sparse_dir.mkdir(exist_ok=True)
+        zero_link = sparse_dir / "0"
+        if zero_link.is_symlink() or zero_link.exists():
+            zero_link.unlink()
+        zero_link.symlink_to(
+            os.path.relpath(undistorted_dir / "sparse", sparse_dir), target_is_directory=True
+        )
+
     steps = []
     total = 0.0
 
@@ -208,11 +230,32 @@ def main():
         return [binary, str(input_dir), "-o", str(output_path)] + extra
 
     if not args.skip_splat:
+        # Our calibration is OPENCV_FISHEYE (real ~200 deg FOV lenses) — correct for
+        # reconstruction, but neither msplat's nor opensplat's COLMAP loader supports that
+        # model (checked both sources directly: msplat errors "Unsupported COLMAP camera
+        # model" on anything but SIMPLE_PINHOLE/PINHOLE/SIMPLE_RADIAL/RADIAL/OPENCV).
+        # `colmap image_undistorter` converts the fisheye reconstruction + images to a
+        # PINHOLE one either trainer can read. Verified end-to-end on a 60-frame test
+        # project: the previous OPENCV-as-fisheye default produced 58-60% NaN gaussians
+        # (gradient-based optimization diverging on degenerate reprojection geometry);
+        # OPENCV_FISHEYE + this undistortion step produced 0% NaN, 100% image coverage in
+        # one sub-model (vs. fragmenting into ~10), PSNR 20.9 (vs. ~10).
+        undistorted_dir = project / "undistorted"
+        steps.append((
+            "7d — Undistort (fisheye -> pinhole for splat training)",
+            ["colmap", "image_undistorter",
+             "--image_path", str(project / "images"),
+             "--input_path", str(splat_input / "sparse" / "0"),
+             "--output_path", str(undistorted_dir),
+             "--output_type", "COLMAP"],
+        ))
+        splat_input_undistorted = project / "undistorted_staged"
+
         backend = args.splat_backend
         splat_bin = find_msplat() if backend == "msplat" else find_opensplat()
         splat_output = project / "splat.ply"
         splat_extra = shlex.split(args.splat_args) if args.splat_args else default_splat_extra(backend, accelerate)
-        splat_cmd = build_splat_cmd(backend, splat_bin, splat_input, splat_output, splat_extra)
+        splat_cmd = build_splat_cmd(backend, splat_bin, splat_input_undistorted, splat_output, splat_extra)
         steps.append((f"8/8 — Gaussian Splat ({backend})" + (" [fast]" if accelerate else ""), splat_cmd))
         # Catches a trainer that "succeeds" (normal exit code, normal-sized file) but wrote
         # majority-NaN gaussians because optimization diverged — invisible from the exit
@@ -223,9 +266,13 @@ def main():
         ))
 
     if args.skip_colmap:
-        # Keep only build + mask — splat and its quality check both need colmap output,
-        # so they're skipped too (matched on "Gaussian", which both step titles contain).
-        steps = [s for s in steps if "colmap" not in s[0].lower() and "Diagnose" not in s[0] and "Gaussian" not in s[0]]
+        # Keep only build + mask — undistortion, splat, and its quality check all need
+        # colmap output, so they're skipped too.
+        steps = [
+            s for s in steps
+            if "colmap" not in s[0].lower() and "Diagnose" not in s[0]
+            and "Gaussian" not in s[0] and "Undistort" not in s[0]
+        ]
 
     print(f"\nFull workflow: {len(steps)} steps")
     print(f"Project: {project}   Samples: {samples}")
@@ -239,6 +286,8 @@ def main():
         print(f"\n\n### {title}")
         elapsed, code = run_step(cmd)
         total += elapsed
+        if title.startswith("7d") and code == 0:
+            prepare_undistorted_splat_input(undistorted_dir, splat_input_undistorted)
         if title.startswith("7c") and code != 0 and not args.force:
             print(
                 "\n" + "="*78 +
